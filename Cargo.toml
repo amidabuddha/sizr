@@ -1,0 +1,20 @@
+[package]
+name = "sizr"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool to explore and list files and folders by size"
+authors = ["amidabuddha"]
+repository = "https://github.com/amidabuddha/sizr"
+license = "MIT"
+keywords = ["cli", "filesystem", "size", "directory", "files"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "sizr"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+walkdir = "2.4"
+humansize = "2.1"
+anyhow = "1.0"
