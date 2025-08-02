@@ -43,20 +43,36 @@ sizr --dirs-only
 # Show only files
 sizr --files-only
 
-# Analyze specific path with custom limit
-sizr --path /Users/username/Documents --limit 15
+# Show only files larger than 1MB
+sizr --min-size 1MB --files-only
+
+# Show items larger than 500KB
+sizr --min-size 500KB
+
+# Analyze specific path with custom limit and size filter
+sizr --path /Users/username/Documents --limit 15 --min-size 2MB
 ```
 
 ### Command Line Options
 
 - `-p, --path <PATH>`: Path to analyze (defaults to current directory)
 - `-l, --limit <LIMIT>`: Number of items to display (default: 10)
+- `-m, --min-size <MIN_SIZE>`: Minimum size to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
 - `--files <BOOL>`: Include files in the listing (default: true)
 - `--directories <BOOL>`: Include directories in the listing (default: true)
 - `-d, --dirs-only`: Show only directories
 - `-f, --files-only`: Show only files
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
+
+#### Size Format Examples
+
+The `--min-size` argument accepts human-readable size formats:
+- `500` or `500B` - 500 bytes
+- `1KB` - 1 kilobyte (1,024 bytes)
+- `1MB` - 1 megabyte (1,048,576 bytes)
+- `2GB` - 2 gigabytes
+- `1TB` - 1 terabyte
 
 ## Examples
 

@@ -9,7 +9,7 @@ use anyhow::{Result, Context};
 #[derive(Parser)]
 #[command(name = "sizr")]
 #[command(about = "A CLI tool to explore and list files and folders by size")]
-#[command(version = "0.1.0")]
+#[command(version = "0.2.0")]
 struct Args {
     /// Path to analyze (defaults to current directory)
     #[arg(short, long, default_value = ".")]
@@ -34,6 +34,10 @@ struct Args {
     /// Show only files (shorthand for --files=true --directories=false)
     #[arg(short, long)]
     files_only: bool,
+
+    /// Minimum size to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
+    #[arg(short = 'm', long, default_value = "0")]
+    min_size: String,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +45,33 @@ struct Item {
     path: String,
     size: u64,
     is_directory: bool,
+}
+
+fn parse_size(size_str: &str) -> Result<u64> {
+    if size_str == "0" {
+        return Ok(0);
+    }
+    
+    let size_str = size_str.to_uppercase();
+    let (number_part, unit_part) = if let Some(pos) = size_str.find(|c: char| c.is_alphabetic()) {
+        (&size_str[..pos], &size_str[pos..])
+    } else {
+        (size_str.as_str(), "")
+    };
+    
+    let number: f64 = number_part.parse()
+        .context(format!("Invalid number in size: {}", number_part))?;
+    
+    let multiplier = match unit_part {
+        "" | "B" => 1,
+        "KB" => 1_024,
+        "MB" => 1_024 * 1_024,
+        "GB" => 1_024 * 1_024 * 1_024,
+        "TB" => 1_024_u64.pow(4),
+        _ => return Err(anyhow::anyhow!("Unknown size unit: {}. Use B, KB, MB, GB, or TB", unit_part)),
+    };
+    
+    Ok((number * multiplier as f64) as u64)
 }
 
 fn main() -> Result<()> {
@@ -55,6 +86,10 @@ fn main() -> Result<()> {
         args.directories = false;
     }
 
+    // Parse minimum size
+    let min_size_bytes = parse_size(&args.min_size)
+        .context(format!("Failed to parse minimum size: {}", args.min_size))?;
+
     let path = Path::new(&args.path);
     if !path.exists() {
         eprintln!("Error: Path '{}' does not exist", args.path);
@@ -62,9 +97,12 @@ fn main() -> Result<()> {
     }
 
     println!("Analyzing path: {}", path.display());
+    if min_size_bytes > 0 {
+        println!("Minimum size filter: {}", format_size(min_size_bytes, DECIMAL));
+    }
     println!("Scanning files and directories...\n");
 
-    let items = scan_directory(&args.path, args.files, args.directories)?;
+    let items = scan_directory(&args.path, args.files, args.directories, min_size_bytes)?;
     
     if items.is_empty() {
         println!("No items found matching the criteria.");
@@ -76,7 +114,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn scan_directory(path: &str, include_files: bool, include_directories: bool) -> Result<Vec<Item>> {
+fn scan_directory(path: &str, include_files: bool, include_directories: bool, min_size: u64) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     let mut dir_sizes: HashMap<String, u64> = HashMap::new();
 
@@ -97,8 +135,8 @@ fn scan_directory(path: &str, include_files: bool, include_directories: bool) ->
                 current_path = parent.parent();
             }
 
-            // Add file to items if files are included
-            if include_files {
+            // Add file to items if files are included and size meets minimum requirement
+            if include_files && size >= min_size {
                 items.push(Item {
                     path: entry_path.to_string_lossy().to_string(),
                     size,
@@ -117,11 +155,14 @@ fn scan_directory(path: &str, include_files: bool, include_directories: bool) ->
                 let path_str = entry_path.to_string_lossy().to_string();
                 let size = dir_sizes.get(&path_str).copied().unwrap_or(0);
                 
-                items.push(Item {
-                    path: path_str,
-                    size,
-                    is_directory: true,
-                });
+                // Add directory to items only if size meets minimum requirement
+                if size >= min_size {
+                    items.push(Item {
+                        path: path_str,
+                        size,
+                        is_directory: true,
+                    });
+                }
             }
         }
     }
