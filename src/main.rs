@@ -10,7 +10,7 @@ use anyhow::{Result, Context};
 #[derive(Parser)]
 #[command(name = "sizr")]
 #[command(about = "A CLI tool to explore and list files and folders by size")]
-#[command(version = "0.2.0")]
+#[command(version = "0.3.0")]
 struct Args {
     /// Path to analyze (defaults to current directory)
     #[arg(short, long, default_value = ".")]
@@ -27,6 +27,10 @@ struct Args {
     /// Show only files
     #[arg(short, long)]
     files_only: bool,
+
+    /// Display full paths instead of truncating them
+    #[arg(short = 'P', long)]
+    full_paths: bool,
 
     /// Minimum size to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
     #[arg(short = 'm', long, default_value = "0")]
@@ -105,7 +109,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    display_results(items, args.limit, scan_duration);
+    display_results(items, args.limit, scan_duration, args.full_paths);
     
     Ok(())
 }
@@ -169,27 +173,44 @@ fn scan_directory(path: &str, include_files: bool, include_directories: bool, mi
     Ok(items)
 }
 
-fn display_results(items: Vec<Item>, limit: usize, scan_duration: std::time::Duration) {
+fn display_results(items: Vec<Item>, limit: usize, scan_duration: std::time::Duration, full_paths: bool) {
     let display_count = std::cmp::min(items.len(), limit);
     
     println!("Top {} largest items:", display_count);
-    println!("{:<50} {:>12} {}", "Path", "Size", "Type");
-    println!("{}", "-".repeat(70));
+    if full_paths {
+        println!("{:<80} {:>12} {}", "Path", "Size", "Type");
+        println!("{}", "-".repeat(100));
+    } else {
+        println!("{:<50} {:>12} {}", "Path", "Size", "Type");
+        println!("{}", "-".repeat(70));
+    }
 
     for (index, item) in items.iter().take(limit).enumerate() {
         let size_str = format_size(item.size, DECIMAL);
         let type_str = if item.is_directory { "DIR" } else { "FILE" };
-        let path_display = if item.path.len() > 47 {
-            format!("...{}", &item.path[item.path.len() - 44..])
+        let path_display = if full_paths {
+            item.path.clone()
+        } else if item.path.chars().count() > 47 {
+            let chars: Vec<char> = item.path.chars().collect();
+            let start_idx = chars.len().saturating_sub(44);
+            format!("...{}", chars[start_idx..].iter().collect::<String>())
         } else {
             item.path.clone()
         };
         
-        println!("{:2}. {:<47} {:>12} {}", 
-                 index + 1, 
-                 path_display, 
-                 size_str, 
-                 type_str);
+        if full_paths {
+            println!("{:2}. {:<77} {:>12} {}", 
+                     index + 1, 
+                     path_display, 
+                     size_str, 
+                     type_str);
+        } else {
+            println!("{:2}. {:<47} {:>12} {}", 
+                     index + 1, 
+                     path_display, 
+                     size_str, 
+                     type_str);
+        }
     }
 
     if items.len() > limit {
