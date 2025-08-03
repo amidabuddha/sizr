@@ -2,6 +2,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 use walkdir::WalkDir;
 use humansize::{format_size, DECIMAL};
 use anyhow::{Result, Context};
@@ -94,14 +95,17 @@ fn main() -> Result<()> {
     }
     println!("Scanning files and directories...\n");
 
+    let start_time = Instant::now();
     let items = scan_directory(&args.path, include_files, include_directories, min_size_bytes)?;
+    let scan_duration = start_time.elapsed();
     
     if items.is_empty() {
         println!("No items found matching the criteria.");
+        println!("Scan completed in {:.2?}", scan_duration);
         return Ok(());
     }
 
-    display_results(items, args.limit);
+    display_results(items, args.limit, scan_duration);
     
     Ok(())
 }
@@ -165,7 +169,7 @@ fn scan_directory(path: &str, include_files: bool, include_directories: bool, mi
     Ok(items)
 }
 
-fn display_results(items: Vec<Item>, limit: usize) {
+fn display_results(items: Vec<Item>, limit: usize, scan_duration: std::time::Duration) {
     let display_count = std::cmp::min(items.len(), limit);
     
     println!("Top {} largest items:", display_count);
@@ -198,4 +202,5 @@ fn display_results(items: Vec<Item>, limit: usize) {
         .map(|item| item.size)
         .sum();
     println!("\nTotal size analyzed: {}", format_size(total_size, DECIMAL));
+    println!("Scan completed in {:.2?}", scan_duration);
 }
