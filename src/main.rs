@@ -19,19 +19,11 @@ struct Args {
     #[arg(short, long, default_value = "10")]
     limit: usize,
 
-    /// Include files in the listing (default: true)
-    #[arg(long, default_value = "true")]
-    files: bool,
-
-    /// Include directories in the listing (default: true)
-    #[arg(long, default_value = "true")]
-    directories: bool,
-
-    /// Show only directories (shorthand for --files=false --directories=true)
+    /// Show only directories
     #[arg(short, long)]
     dirs_only: bool,
 
-    /// Show only files (shorthand for --files=true --directories=false)
+    /// Show only files
     #[arg(short, long)]
     files_only: bool,
 
@@ -75,16 +67,16 @@ fn parse_size(size_str: &str) -> Result<u64> {
 }
 
 fn main() -> Result<()> {
-    let mut args = Args::parse();
+    let args = Args::parse();
 
-    // Handle shorthand flags
-    if args.dirs_only {
-        args.files = false;
-        args.directories = true;
+    // Determine what to include based on flags
+    let (include_files, include_directories) = if args.dirs_only {
+        (false, true)
     } else if args.files_only {
-        args.files = true;
-        args.directories = false;
-    }
+        (true, false)
+    } else {
+        (true, true)  // Default: show both files and directories
+    };
 
     // Parse minimum size
     let min_size_bytes = parse_size(&args.min_size)
@@ -102,7 +94,7 @@ fn main() -> Result<()> {
     }
     println!("Scanning files and directories...\n");
 
-    let items = scan_directory(&args.path, args.files, args.directories, min_size_bytes)?;
+    let items = scan_directory(&args.path, include_files, include_directories, min_size_bytes)?;
     
     if items.is_empty() {
         println!("No items found matching the criteria.");
@@ -200,6 +192,10 @@ fn display_results(items: Vec<Item>, limit: usize) {
         println!("\n... and {} more items", items.len() - limit);
     }
 
-    let total_size: u64 = items.iter().map(|item| item.size).sum();
+    // Calculate total size based only on files to avoid double-counting
+    let total_size: u64 = items.iter()
+        .filter(|item| !item.is_directory)
+        .map(|item| item.size)
+        .sum();
     println!("\nTotal size analyzed: {}", format_size(total_size, DECIMAL));
 }
