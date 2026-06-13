@@ -140,9 +140,10 @@ sizr -p / -f -m 1GB -l 20
 The tool displays results in a formatted table showing:
 1. Rank number
 2. Path (truncated by default, full path with `--full-paths`)
-3. Size in human-readable format
+3. Size in human-readable format (DIR rows show contained file bytes for ranking)
 4. Type (FILE or DIR)
-5. Execution timing information
+5. Total matching file bytes, counted once without adding directory rows on top of their contents
+6. Execution timing information
 
 Example output:
 ```
@@ -157,7 +158,7 @@ Path                                              Size Type
  3. ...username/Documents/archive.zip              500 MB FILE
  ...
 
-Total size analyzed: 15.2 GB
+Total matching file size: 15.2 GB
 Scan completed in 245.67ms
 ```
 
@@ -169,7 +170,7 @@ Path                                                                            
  2. /Users/username/Documents/Photos                                            1.8 GB DIR
  ...
 
-Total size analyzed: 15.2 GB
+Total matching file size: 15.2 GB
 Scan completed in 245.67ms
 ```
 
