@@ -21,6 +21,7 @@ pub const SYMLINKS_FOLLOWED: bool = false;
 pub enum SizeMode {
     Logical,
     DiskUsage,
+    Combined,
 }
 
 impl SizeMode {
@@ -28,6 +29,7 @@ impl SizeMode {
         match self {
             Self::Logical => "logical",
             Self::DiskUsage => "disk_usage",
+            Self::Combined => "combined",
         }
     }
 
@@ -35,6 +37,7 @@ impl SizeMode {
         match self {
             Self::Logical => LOGICAL_SIZE_SEMANTICS,
             Self::DiskUsage => DISK_USAGE_SIZE_SEMANTICS,
+            Self::Combined => LOGICAL_SIZE_SEMANTICS,
         }
     }
 
@@ -42,6 +45,7 @@ impl SizeMode {
         match self {
             Self::Logical => LOGICAL_DIRECTORY_SIZE_SEMANTICS,
             Self::DiskUsage => DISK_USAGE_DIRECTORY_SIZE_SEMANTICS,
+            Self::Combined => LOGICAL_DIRECTORY_SIZE_SEMANTICS,
         }
     }
 
@@ -49,15 +53,24 @@ impl SizeMode {
         match self {
             Self::Logical => "Total matching file size",
             Self::DiskUsage => "Total matching disk usage",
+            Self::Combined => "Total matching logical size",
         }
     }
 
     fn validate_platform(self) -> Result<()> {
-        if self == Self::DiskUsage && !cfg!(unix) {
-            bail!("Disk usage mode is only supported on Unix-like platforms");
+        if self.requires_disk_usage() && !cfg!(unix) {
+            bail!("Disk usage modes are only supported on Unix-like platforms");
         }
 
         Ok(())
+    }
+
+    pub fn is_combined(self) -> bool {
+        self == Self::Combined
+    }
+
+    fn requires_disk_usage(self) -> bool {
+        matches!(self, Self::DiskUsage | Self::Combined)
     }
 }
 
@@ -96,6 +109,8 @@ impl ScanOptions {
 pub struct Item {
     pub path: String,
     pub size: u64,
+    pub logical_size: u64,
+    pub disk_usage_size: Option<u64>,
     pub is_directory: bool,
 }
 
@@ -103,6 +118,8 @@ pub struct Item {
 pub struct ScanResult {
     pub items: Vec<Item>,
     pub matching_total_size: u64,
+    pub matching_logical_size: u64,
+    pub matching_disk_usage_size: Option<u64>,
     pub size_mode: SizeMode,
     pub respect_gitignore: bool,
     pub warnings: Vec<String>,
@@ -121,8 +138,18 @@ pub struct JsonOutput {
     pub limit: usize,
     pub displayed_count: usize,
     pub total_items_count: usize,
-    pub total_matching_size_bytes: u64,
-    pub total_matching_size_human: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_logical_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_logical_size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_disk_usage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matching_disk_usage_human: Option<String>,
     pub elapsed_ms: f64,
     pub items: Vec<JsonItem>,
     pub warnings: JsonWarnings,
@@ -134,8 +161,18 @@ pub struct JsonItem {
     pub path: String,
     #[serde(rename = "type")]
     pub item_type: &'static str,
-    pub size_bytes: u64,
-    pub size_human: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_usage_human: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,10 +227,10 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     options.size_mode.validate_platform()?;
 
     let mut items = Vec::new();
-    let mut dir_sizes: HashMap<String, u64> = HashMap::new();
+    let mut dir_sizes: HashMap<String, SizeAccumulator> = HashMap::new();
     let mut directories = Vec::new();
     let mut warnings = Vec::new();
-    let mut matching_total_size = 0_u64;
+    let mut matching_totals = SizeAccumulator::default();
     let mut hardlinks = HardlinkTracker::default();
 
     for entry in walk_entries(path.as_ref(), options.respect_gitignore) {
@@ -213,7 +250,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
             if entry.depth() > 0 {
                 let path_str = entry_path.to_string_lossy().to_string();
                 directories.push(path_str.clone());
-                dir_sizes.entry(path_str).or_insert(0);
+                dir_sizes.entry(path_str).or_default();
             }
             continue;
         }
@@ -229,17 +266,17 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
                     continue;
                 }
             };
-            let size = match measure_file(entry_path, &metadata, options.size_mode, &mut hardlinks)
+            let sizes = match measure_file(entry_path, &metadata, options.size_mode, &mut hardlinks)
             {
-                Ok(size) => size,
+                Ok(sizes) => sizes,
                 Err(error) => {
                     warnings.push(error);
                     continue;
                 }
             };
-            let file_matches = size >= options.min_size;
+            let file_matches = sizes.selected >= options.min_size;
             if file_matches {
-                matching_total_size += size;
+                matching_totals.add(sizes);
             }
 
             // Add the selected size metric to parent directories inside the scanned root only.
@@ -249,14 +286,16 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
                     break;
                 };
                 let parent_str = parent.to_string_lossy().to_string();
-                *dir_sizes.entry(parent_str).or_insert(0) += size;
+                dir_sizes.entry(parent_str).or_default().add(sizes);
                 current_path = parent.parent();
             }
 
             if options.include_files && file_matches {
                 items.push(Item {
                     path: entry_path.to_string_lossy().to_string(),
-                    size,
+                    size: sizes.selected,
+                    logical_size: sizes.logical,
+                    disk_usage_size: sizes.disk_usage,
                     is_directory: false,
                 });
             }
@@ -265,12 +304,14 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
 
     if options.include_directories {
         for path_str in directories {
-            let size = dir_sizes.get(&path_str).copied().unwrap_or(0);
+            let sizes = dir_sizes.get(&path_str).copied().unwrap_or_default();
 
-            if size >= options.min_size {
+            if sizes.selected >= options.min_size {
                 items.push(Item {
                     path: path_str,
-                    size,
+                    size: sizes.selected,
+                    logical_size: sizes.logical,
+                    disk_usage_size: sizes.disk_usage,
                     is_directory: true,
                 });
             }
@@ -281,7 +322,9 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
 
     Ok(ScanResult {
         items,
-        matching_total_size,
+        matching_total_size: matching_totals.selected,
+        matching_logical_size: matching_totals.logical,
+        matching_disk_usage_size: matching_totals.disk_usage,
         size_mode: options.size_mode,
         respect_gitignore: options.respect_gitignore,
         warnings,
@@ -320,16 +363,68 @@ struct HardlinkTracker {
     seen: HashSet<(u64, u64)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SizeValues {
+    selected: u64,
+    logical: u64,
+    disk_usage: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SizeAccumulator {
+    selected: u64,
+    logical: u64,
+    disk_usage: Option<u64>,
+}
+
+impl SizeAccumulator {
+    fn add(&mut self, sizes: SizeValues) {
+        self.selected = self.selected.saturating_add(sizes.selected);
+        self.logical = self.logical.saturating_add(sizes.logical);
+
+        if let Some(disk_usage) = sizes.disk_usage {
+            let current = self.disk_usage.unwrap_or(0);
+            self.disk_usage = Some(current.saturating_add(disk_usage));
+        }
+    }
+}
+
 fn measure_file(
     path: &Path,
     metadata: &fs::Metadata,
     size_mode: SizeMode,
     hardlinks: &mut HardlinkTracker,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<SizeValues, String> {
+    let logical = metadata.len();
+
     match size_mode {
-        SizeMode::Logical => Ok(metadata.len()),
-        SizeMode::DiskUsage => disk_usage_bytes(metadata, hardlinks)
-            .map_err(|error| format!("Failed to get disk usage for {}: {error}", path.display())),
+        SizeMode::Logical => Ok(SizeValues {
+            selected: logical,
+            logical,
+            disk_usage: None,
+        }),
+        SizeMode::DiskUsage => {
+            let disk_usage = disk_usage_bytes(metadata, hardlinks).map_err(|error| {
+                format!("Failed to get disk usage for {}: {error}", path.display())
+            })?;
+
+            Ok(SizeValues {
+                selected: disk_usage,
+                logical,
+                disk_usage: Some(disk_usage),
+            })
+        }
+        SizeMode::Combined => {
+            let disk_usage = disk_usage_bytes(metadata, hardlinks).map_err(|error| {
+                format!("Failed to get disk usage for {}: {error}", path.display())
+            })?;
+
+            Ok(SizeValues {
+                selected: logical,
+                logical,
+                disk_usage: Some(disk_usage),
+            })
+        }
     }
 }
 
@@ -366,13 +461,29 @@ pub fn build_json_output(
             rank: index + 1,
             path: item.path.clone(),
             item_type: if item.is_directory { "dir" } else { "file" },
-            size_bytes: item.size,
-            size_human: format_human_size(item.size),
+            size_bytes: (!scan_result.size_mode.is_combined()).then_some(item.size),
+            size_human: (!scan_result.size_mode.is_combined())
+                .then(|| format_human_size(item.size)),
+            logical_size_bytes: scan_result
+                .size_mode
+                .is_combined()
+                .then_some(item.logical_size),
+            logical_size_human: scan_result
+                .size_mode
+                .is_combined()
+                .then(|| format_human_size(item.logical_size)),
+            disk_usage_bytes: item
+                .disk_usage_size
+                .filter(|_| scan_result.size_mode.is_combined()),
+            disk_usage_human: item
+                .disk_usage_size
+                .filter(|_| scan_result.size_mode.is_combined())
+                .map(format_human_size),
         })
         .collect();
 
     JsonOutput {
-        schema_version: 3,
+        schema_version: 4,
         root_path: root_path.display().to_string(),
         size_mode: scan_result.size_mode.as_str(),
         size_semantics: scan_result.size_mode.size_semantics(),
@@ -383,8 +494,26 @@ pub fn build_json_output(
         limit,
         displayed_count,
         total_items_count: scan_result.items.len(),
-        total_matching_size_bytes: scan_result.matching_total_size,
-        total_matching_size_human: format_human_size(scan_result.matching_total_size),
+        total_matching_size_bytes: (!scan_result.size_mode.is_combined())
+            .then_some(scan_result.matching_total_size),
+        total_matching_size_human: (!scan_result.size_mode.is_combined())
+            .then(|| format_human_size(scan_result.matching_total_size)),
+        total_matching_logical_size_bytes: scan_result
+            .size_mode
+            .is_combined()
+            .then_some(scan_result.matching_logical_size),
+        total_matching_logical_size_human: scan_result
+            .size_mode
+            .is_combined()
+            .then(|| format_human_size(scan_result.matching_logical_size)),
+        total_matching_disk_usage_bytes: scan_result
+            .size_mode
+            .is_combined()
+            .then_some(scan_result.matching_disk_usage_size.unwrap_or(0)),
+        total_matching_disk_usage_human: scan_result
+            .size_mode
+            .is_combined()
+            .then(|| format_human_size(scan_result.matching_disk_usage_size.unwrap_or(0))),
         elapsed_ms: scan_duration.as_secs_f64() * 1000.0,
         items,
         warnings: JsonWarnings {
@@ -558,8 +687,8 @@ mod tests {
         let output = build_json_output(&root, &scan_result, 1, Duration::from_millis(12), 0);
         let serialized = serde_json::to_string(&output).expect("JSON output should serialize");
 
-        assert!(serialized.contains("\"schema_version\":3"));
-        assert_eq!(output.schema_version, 3);
+        assert!(serialized.contains("\"schema_version\":4"));
+        assert_eq!(output.schema_version, 4);
         assert_eq!(output.size_mode, "logical");
         assert_eq!(output.size_semantics, "logical_file_size_bytes");
         assert_eq!(
@@ -571,9 +700,10 @@ mod tests {
         assert_eq!(output.limit, 1);
         assert_eq!(output.displayed_count, 1);
         assert_eq!(output.total_items_count, 4);
-        assert_eq!(output.total_matching_size_bytes, 3_000);
+        assert_eq!(output.total_matching_size_bytes, Some(3_000));
         assert_eq!(output.items.len(), 1);
         assert_eq!(output.items[0].rank, 1);
+        assert!(output.items[0].size_bytes.is_some());
         assert_eq!(output.warnings.count, 0);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
@@ -623,6 +753,45 @@ mod tests {
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].size, expected_size);
         assert_eq!(result.items[1].size, 0);
+
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_mode_ranks_by_logical_size_and_reports_both_metrics() {
+        let root = test_root("combined-mode");
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let file_path = root.join("allocated.bin");
+        create_written_file(&file_path, 4_096);
+        let expected_disk_usage = allocated_size(&file_path);
+
+        let result = scan_directory(
+            &root,
+            ScanOptions::new(true, false, 0).with_size_mode(SizeMode::Combined),
+        )
+        .unwrap();
+        let output = build_json_output(&root, &result, 1, Duration::from_millis(12), 0);
+
+        assert_eq!(result.size_mode, SizeMode::Combined);
+        assert_eq!(result.matching_total_size, 4_096);
+        assert_eq!(result.matching_logical_size, 4_096);
+        assert_eq!(result.matching_disk_usage_size, Some(expected_disk_usage));
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].size, 4_096);
+        assert_eq!(result.items[0].logical_size, 4_096);
+        assert_eq!(result.items[0].disk_usage_size, Some(expected_disk_usage));
+        assert_eq!(output.schema_version, 4);
+        assert_eq!(output.size_mode, "combined");
+        assert_eq!(output.total_matching_size_bytes, None);
+        assert_eq!(output.total_matching_logical_size_bytes, Some(4_096));
+        assert_eq!(
+            output.total_matching_disk_usage_bytes,
+            Some(expected_disk_usage)
+        );
+        assert_eq!(output.items[0].size_bytes, None);
+        assert_eq!(output.items[0].logical_size_bytes, Some(4_096));
+        assert_eq!(output.items[0].disk_usage_bytes, Some(expected_disk_usage));
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }

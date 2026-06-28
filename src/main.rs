@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use sizr::{
-    build_json_output, format_human_size, parse_size, scan_directory, write_json_output, Item,
+    build_json_output, format_human_size, parse_size, scan_directory, write_json_output,
     ScanOptions, SizeMode,
 };
 use std::io;
@@ -38,8 +38,12 @@ struct Args {
     min_size: String,
 
     /// Rank by allocated disk usage instead of logical file size
-    #[arg(long, visible_alias = "du")]
+    #[arg(long, visible_alias = "du", conflicts_with = "both")]
     disk_usage: bool,
+
+    /// Show logical size and disk usage side by side, ranked by logical size
+    #[arg(long, visible_aliases = ["combined", "compare"])]
+    both: bool,
 
     /// Skip files ignored by .gitignore, .git/info/exclude, or global gitignore rules
     #[arg(long, visible_alias = "no-gitignored")]
@@ -65,7 +69,9 @@ fn main() -> Result<()> {
 
     if !args.json {
         println!("Analyzing path: {}", path.display());
-        if args.disk_usage {
+        if args.both {
+            println!("Size metric: logical size + disk usage (ranked by logical size)");
+        } else if args.disk_usage {
             println!("Size metric: disk usage (allocated filesystem blocks)");
         }
         if args.respect_gitignore {
@@ -74,7 +80,9 @@ fn main() -> Result<()> {
         if min_size_bytes > 0 {
             println!(
                 "Minimum {} filter: {}",
-                if args.disk_usage {
+                if args.both {
+                    "logical size"
+                } else if args.disk_usage {
                     "disk usage"
                 } else {
                     "size"
@@ -105,23 +113,12 @@ fn main() -> Result<()> {
 
     if scan_result.items.is_empty() {
         println!("No items found matching the criteria.");
-        println!(
-            "{}: {}",
-            scan_result.size_mode.total_label(),
-            format_human_size(scan_result.matching_total_size)
-        );
+        print_totals(&scan_result);
         println!("Scan completed in {scan_duration:.2?}");
         return Ok(());
     }
 
-    display_results(
-        &scan_result.items,
-        args.limit,
-        scan_duration,
-        args.full_paths,
-        scan_result.matching_total_size,
-        scan_result.size_mode,
-    );
+    display_results(&scan_result, args.limit, scan_duration, args.full_paths);
 
     Ok(())
 }
@@ -135,7 +132,9 @@ fn scan_options_from_args(args: &Args, min_size: u64) -> ScanOptions {
         (true, true)
     };
 
-    let size_mode = if args.disk_usage {
+    let size_mode = if args.both {
+        SizeMode::Combined
+    } else if args.disk_usage {
         SizeMode::DiskUsage
     } else {
         SizeMode::Logical
@@ -164,17 +163,25 @@ fn print_warnings(warnings: &[String]) {
 }
 
 fn display_results(
-    items: &[Item],
+    scan_result: &sizr::ScanResult,
     limit: usize,
     scan_duration: Duration,
     full_paths: bool,
-    matching_total_size: u64,
-    size_mode: SizeMode,
 ) {
+    let items = &scan_result.items;
+    let size_mode = scan_result.size_mode;
     let display_count = std::cmp::min(items.len(), limit);
 
     println!("Top {display_count} largest items:");
-    if full_paths {
+    if size_mode.is_combined() {
+        if full_paths {
+            println!("{:<72} {:>12} {:>12} Type", "Path", "Logical", "Disk Usage");
+            println!("{}", "-".repeat(108));
+        } else {
+            println!("{:<42} {:>12} {:>12} Type", "Path", "Logical", "Disk Usage");
+            println!("{}", "-".repeat(78));
+        }
+    } else if full_paths {
         println!("{:<80} {:>12} Type", "Path", "Size");
         println!("{}", "-".repeat(100));
     } else {
@@ -183,11 +190,14 @@ fn display_results(
     }
 
     for (index, item) in items.iter().take(limit).enumerate() {
-        let size_str = format_human_size(item.size);
         let type_str = if item.is_directory { "DIR" } else { "FILE" };
         let path_display = if full_paths {
             item.path.clone()
-        } else if item.path.chars().count() > 47 {
+        } else if size_mode.is_combined() && item.path.chars().count() > 39 {
+            let chars: Vec<char> = item.path.chars().collect();
+            let start_idx = chars.len().saturating_sub(36);
+            format!("...{}", chars[start_idx..].iter().collect::<String>())
+        } else if !size_mode.is_combined() && item.path.chars().count() > 47 {
             let chars: Vec<char> = item.path.chars().collect();
             let start_idx = chars.len().saturating_sub(44);
             format!("...{}", chars[start_idx..].iter().collect::<String>())
@@ -195,7 +205,31 @@ fn display_results(
             item.path.clone()
         };
 
-        if full_paths {
+        if size_mode.is_combined() {
+            let logical_size = format_human_size(item.logical_size);
+            let disk_usage = format_human_size(item.disk_usage_size.unwrap_or(0));
+
+            if full_paths {
+                println!(
+                    "{:2}. {:<69} {:>12} {:>12} {}",
+                    index + 1,
+                    path_display,
+                    logical_size,
+                    disk_usage,
+                    type_str
+                );
+            } else {
+                println!(
+                    "{:2}. {:<39} {:>12} {:>12} {}",
+                    index + 1,
+                    path_display,
+                    logical_size,
+                    disk_usage,
+                    type_str
+                );
+            }
+        } else if full_paths {
+            let size_str = format_human_size(item.size);
             println!(
                 "{:2}. {:<77} {:>12} {}",
                 index + 1,
@@ -204,6 +238,7 @@ fn display_results(
                 type_str
             );
         } else {
+            let size_str = format_human_size(item.size);
             println!(
                 "{:2}. {:<47} {:>12} {}",
                 index + 1,
@@ -218,12 +253,51 @@ fn display_results(
         println!("\n... and {} more items", items.len() - limit);
     }
 
-    println!(
-        "\n{}: {}",
-        size_mode.total_label(),
-        format_human_size(matching_total_size)
+    print_totals_for_mode(
+        scan_result.matching_total_size,
+        scan_result.matching_logical_size,
+        scan_result.matching_disk_usage_size,
+        size_mode,
+        true,
     );
     println!("Scan completed in {scan_duration:.2?}");
+}
+
+fn print_totals(scan_result: &sizr::ScanResult) {
+    print_totals_for_mode(
+        scan_result.matching_total_size,
+        scan_result.matching_logical_size,
+        scan_result.matching_disk_usage_size,
+        scan_result.size_mode,
+        false,
+    );
+}
+
+fn print_totals_for_mode(
+    matching_total_size: u64,
+    matching_logical_size: u64,
+    matching_disk_usage_size: Option<u64>,
+    size_mode: SizeMode,
+    leading_newline: bool,
+) {
+    let prefix = if leading_newline { "\n" } else { "" };
+
+    if size_mode.is_combined() {
+        println!(
+            "{prefix}Total matching logical size: {}",
+            format_human_size(matching_logical_size)
+        );
+        println!(
+            "Total matching disk usage: {}",
+            format_human_size(matching_disk_usage_size.unwrap_or(0))
+        );
+    } else {
+        println!(
+            "{prefix}{}: {}",
+            size_mode.total_label(),
+            format_human_size(matching_total_size)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +314,18 @@ mod tests {
         let args = Args::try_parse_from(["sizr", "--du"]).unwrap();
 
         assert!(args.disk_usage);
+    }
+
+    #[test]
+    fn both_aliases_enable_combined_mode() {
+        let args = Args::try_parse_from(["sizr", "--combined"]).unwrap();
+
+        assert!(args.both);
+    }
+
+    #[test]
+    fn both_and_disk_usage_conflict() {
+        assert!(Args::try_parse_from(["sizr", "--both", "--disk-usage"]).is_err());
     }
 
     #[test]

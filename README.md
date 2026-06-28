@@ -81,6 +81,11 @@ sizr --disk-usage
 # or using the visible alias
 sizr --du
 
+# Show logical size and disk usage side by side
+sizr --both
+# or using a visible alias
+sizr --combined
+
 # Skip files ignored by gitignore rules
 sizr --respect-gitignore
 # or using the visible alias
@@ -106,6 +111,7 @@ sizr -p /Users/username/Documents -l 15 -m 2MB
 - `-f, --files-only`: Show only files
 - `-P, --full-paths`: Display full paths instead of truncating them
 - `--disk-usage`, `--du`: Rank and filter by allocated disk usage instead of logical file size
+- `--both`, `--combined`, `--compare`: Show logical size and disk usage side by side, ranked and filtered by logical size
 - `--respect-gitignore`, `--no-gitignored`: Skip files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules
 - `--json`: Output machine-readable JSON instead of the human table
 - `-h, --help`: Show help information
@@ -132,7 +138,9 @@ By default, `sizr` reports logical file size in bytes, using filesystem metadata
 
 With `--disk-usage` or `--du`, `sizr` uses allocated filesystem blocks instead. This answers the `du`-style question: how much disk space is actually allocated for matching files. Directory rows and totals are then based on contained allocated disk usage. Disk-usage mode is supported on Unix-like platforms.
 
-The human table shows one selected metric at a time so rankings and totals stay unambiguous. Use the default mode for logical size and `--disk-usage` when allocated space is the question; a side-by-side comparison mode can be added separately if both columns become useful in daily use.
+The default table shows one selected metric so rankings and totals stay compact. Use `--both`, `--combined`, or `--compare` to show logical size and disk usage side by side. Combined mode ranks and filters by logical size, then reports both logical and allocated totals.
+
+In JSON output, single-metric modes use `size_bytes` / `size_human` and `total_matching_size_*`. Combined mode omits those generic selected-size fields and instead emits explicit `logical_size_*` and `disk_usage_*` fields for items and totals.
 
 In disk-usage mode on Unix-like platforms, hardlinked files are counted once per device/inode pair. Later hardlink paths in traversal order contribute `0 B` to avoid double-counting allocated blocks.
 
@@ -189,6 +197,9 @@ sizr --path ~/Downloads --files-only --min-size 50MB --json
 # Find paths by allocated disk usage
 sizr --path ~/Downloads --disk-usage --limit 20
 
+# Compare logical size and allocated disk usage
+sizr --path ~/Downloads --both --limit 20
+
 # Scan a repository while skipping ignored build/cache output
 sizr --path . --respect-gitignore --limit 20
 
@@ -237,10 +248,23 @@ Total matching file size: 15.2 GB
 Scan completed in 245.67ms
 ```
 
+With `--both`:
+```
+Path                                            Logical   Disk Usage Type
+------------------------------------------------------------------------------
+ 1. ...username/Documents/sparse.img             10.0 GB      10.2 MB FILE
+ 2. ...username/Documents/Photos                  1.8 GB       1.9 GB DIR
+ ...
+
+Total matching logical size: 15.2 GB
+Total matching disk usage: 7.4 GB
+Scan completed in 245.67ms
+```
+
 With `--json`, stdout contains only JSON:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "root_path": "/Users/username/Documents",
   "size_mode": "logical",
   "size_semantics": "logical_file_size_bytes",
