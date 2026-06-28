@@ -34,6 +34,9 @@ cargo build --release
 
 # Optional: install the binary into Cargo's bin directory
 cargo install --path .
+
+# Optional: install to /usr/local/bin instead
+sudo install -m 755 target/release/sizr /usr/local/bin/sizr
 ```
 
 ## Usage
