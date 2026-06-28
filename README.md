@@ -4,11 +4,12 @@ A CLI tool written in Rust to explore and list files and folders by size.
 
 ## Features
 
-- Analyze files and folders in any directory
+- Analyze logical file sizes in any directory
 - Sort results by size (largest first)
 - Configurable number of results to display
 - Option to show only files, only directories, or both
 - Human-readable file sizes
+- Machine-readable JSON output
 - Minimum size filtering with flexible units (B, KB, MB, GB, TB)
 - Full path display option for complete file paths
 - Execution timing to track scan performance
@@ -70,6 +71,9 @@ sizr --full-paths
 # or using short form
 sizr -P
 
+# Output machine-readable JSON
+sizr --json
+
 # Combine options: show only large files with full paths
 sizr --files-only --min-size 10MB --full-paths
 # or using short forms
@@ -89,6 +93,7 @@ sizr -p /Users/username/Documents -l 15 -m 2MB
 - `-d, --dirs-only`: Show only directories
 - `-f, --files-only`: Show only files
 - `-P, --full-paths`: Display full paths instead of truncating them
+- `--json`: Output machine-readable JSON instead of the human table
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
 
@@ -100,6 +105,33 @@ The `--min-size` argument accepts human-readable size formats:
 - `1MB` - 1 megabyte (1,048,576 bytes)
 - `2GB` - 2 gigabytes
 - `1TB` - 1 terabyte
+
+## Size Semantics
+
+`sizr` reports logical file size in bytes, using filesystem metadata for regular files. It does not report allocated disk blocks and is not equivalent to `du`.
+
+- File rows show the file's logical byte length.
+- Directory rows show the sum of contained regular file logical sizes, used for ranking.
+- The footer, `Total matching file size`, counts matching file rows once and does not add directory rows on top of their contents.
+- `--min-size` applies to file rows by individual file size and to directory rows by aggregate directory size.
+- Symlinks are not followed or counted by default.
+
+## Library API
+
+The crate also exposes the scanner and JSON primitives for Rust callers:
+
+```rust
+use sizr::{scan_directory, ScanOptions};
+
+fn main() -> anyhow::Result<()> {
+    let result = scan_directory(".", ScanOptions::new(true, true, 0))?;
+    for item in result.items {
+        println!("{}\t{}", item.size, item.path);
+    }
+
+    Ok(())
+}
+```
 
 ## Examples
 
@@ -128,6 +160,9 @@ sizr -p /var/log -f -l 15
 sizr --path ~/Downloads --full-paths --limit 5
 # or using short forms
 sizr -p ~/Downloads -P -l 5
+
+# Emit JSON for scripts or CI checks
+sizr --path ~/Downloads --files-only --min-size 50MB --json
 
 # Find large files across the system with size filtering
 sizr --path / --files-only --min-size 1GB --limit 20
@@ -174,12 +209,44 @@ Total matching file size: 15.2 GB
 Scan completed in 245.67ms
 ```
 
+With `--json`, stdout contains only JSON:
+```json
+{
+  "schema_version": 1,
+  "root_path": "/Users/username/Documents",
+  "size_semantics": "logical_file_size_bytes",
+  "directory_size_semantics": "sum_of_contained_logical_file_size_bytes",
+  "symlinks_followed": false,
+  "min_size_bytes": 0,
+  "limit": 1,
+  "displayed_count": 1,
+  "total_items_count": 2,
+  "total_matching_file_size_bytes": 1500000,
+  "total_matching_file_size_human": "1.5 MB",
+  "elapsed_ms": 245.67,
+  "items": [
+    {
+      "rank": 1,
+      "path": "/Users/username/Documents/large-video.mp4",
+      "type": "file",
+      "size_bytes": 1500000,
+      "size_human": "1.5 MB"
+    }
+  ],
+  "warnings": {
+    "count": 0,
+    "messages": []
+  }
+}
+```
+
 ## Dependencies
 
 - `clap`: Command-line argument parsing
 - `walkdir`: Recursive directory traversal
 - `humansize`: Human-readable size formatting
 - `anyhow`: Error handling
+- `serde` and `serde_json`: JSON output
 
 ## License
 
