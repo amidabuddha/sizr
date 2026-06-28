@@ -132,6 +132,10 @@ By default, `sizr` reports logical file size in bytes, using filesystem metadata
 
 With `--disk-usage` or `--du`, `sizr` uses allocated filesystem blocks instead. This answers the `du`-style question: how much disk space is actually allocated for matching files. Directory rows and totals are then based on contained allocated disk usage. Disk-usage mode is supported on Unix-like platforms.
 
+The human table shows one selected metric at a time so rankings and totals stay unambiguous. Use the default mode for logical size and `--disk-usage` when allocated space is the question; a side-by-side comparison mode can be added separately if both columns become useful in daily use.
+
+In disk-usage mode on Unix-like platforms, hardlinked files are counted once per device/inode pair. Later hardlink paths in traversal order contribute `0 B` to avoid double-counting allocated blocks.
+
 By default, `sizr` scans what is actually on disk, including files ignored by Git. With `--respect-gitignore` or `--no-gitignored`, it skips files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules. This is useful when you want the “what could matter to this repo?” view instead of cache/build-output growth.
 
 ## Library API

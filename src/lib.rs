@@ -3,6 +3,8 @@ use humansize::{format_size, DECIMAL};
 use ignore::{DirEntry, WalkBuilder};
 use serde::Serialize;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -192,6 +194,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     let mut directories = Vec::new();
     let mut warnings = Vec::new();
     let mut matching_total_size = 0_u64;
+    let mut hardlinks = HardlinkTracker::default();
 
     for entry in walk_entries(path.as_ref(), options.respect_gitignore) {
         let entry = match entry {
@@ -216,7 +219,18 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
         }
 
         if file_type.is_file() {
-            let size = match measure_file(entry_path, options.size_mode) {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    warnings.push(format!(
+                        "Failed to get metadata for {}: {error}",
+                        entry_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let size = match measure_file(entry_path, &metadata, options.size_mode, &mut hardlinks)
+            {
                 Ok(size) => size,
                 Err(error) => {
                     warnings.push(error);
@@ -300,26 +314,38 @@ fn is_git_metadata_dir(entry: &DirEntry) -> bool {
         && entry.file_name() == OsStr::new(".git")
 }
 
-fn measure_file(path: &Path, size_mode: SizeMode) -> std::result::Result<u64, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("Failed to get metadata for {}: {error}", path.display()))?;
+#[derive(Default)]
+struct HardlinkTracker {
+    #[cfg(unix)]
+    seen: HashSet<(u64, u64)>,
+}
 
+fn measure_file(
+    path: &Path,
+    metadata: &fs::Metadata,
+    size_mode: SizeMode,
+    hardlinks: &mut HardlinkTracker,
+) -> std::result::Result<u64, String> {
     match size_mode {
         SizeMode::Logical => Ok(metadata.len()),
-        SizeMode::DiskUsage => disk_usage_bytes(&metadata)
+        SizeMode::DiskUsage => disk_usage_bytes(metadata, hardlinks)
             .map_err(|error| format!("Failed to get disk usage for {}: {error}", path.display())),
     }
 }
 
 #[cfg(unix)]
-fn disk_usage_bytes(metadata: &fs::Metadata) -> Result<u64> {
+fn disk_usage_bytes(metadata: &fs::Metadata, hardlinks: &mut HardlinkTracker) -> Result<u64> {
     use std::os::unix::fs::MetadataExt;
+
+    if metadata.nlink() > 1 && !hardlinks.seen.insert((metadata.dev(), metadata.ino())) {
+        return Ok(0);
+    }
 
     Ok(metadata.blocks().saturating_mul(512))
 }
 
 #[cfg(not(unix))]
-fn disk_usage_bytes(_metadata: &fs::Metadata) -> Result<u64> {
+fn disk_usage_bytes(_metadata: &fs::Metadata, _hardlinks: &mut HardlinkTracker) -> Result<u64> {
     bail!("disk usage is only supported on Unix-like platforms")
 }
 
@@ -504,6 +530,27 @@ mod tests {
     }
 
     #[test]
+    fn unicode_paths_are_scanned_without_loss() {
+        let root = test_root("unicode-paths");
+        let nested = root.join("данни-サイズ");
+        fs::create_dir_all(&nested).expect("unicode fixture directory should be created");
+        create_file(&nested.join("файл.bin"), 1_234);
+
+        let result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
+
+        assert!(result
+            .items
+            .iter()
+            .any(|item| item.path.contains("данни-サイズ")));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| item.path.contains("файл.bin")));
+
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
     fn json_output_includes_limited_items_and_summary_fields() {
         let root = create_fixture("json-summary");
         let scan_result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
@@ -551,6 +598,31 @@ mod tests {
         assert_eq!(result.matching_total_size, expected_size);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].size, expected_size);
+
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_usage_mode_counts_hardlinked_inode_once() {
+        let root = test_root("disk-usage-hardlinks");
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let original = root.join("original.bin");
+        let linked = root.join("linked.bin");
+        create_written_file(&original, 4_096);
+        fs::hard_link(&original, &linked).expect("hardlink should be created");
+        let expected_size = allocated_size(&original);
+
+        let result = scan_directory(
+            &root,
+            ScanOptions::new(true, false, 0).with_size_mode(SizeMode::DiskUsage),
+        )
+        .unwrap();
+
+        assert_eq!(result.matching_total_size, expected_size);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].size, expected_size);
+        assert_eq!(result.items[1].size, 0);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
