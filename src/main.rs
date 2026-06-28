@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use sizr::{
     build_json_output, format_human_size, parse_size, scan_directory, write_json_output, Item,
-    ScanOptions,
+    ScanOptions, SizeMode,
 };
 use std::io;
 use std::path::Path;
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "sizr")]
-#[command(about = "Explore and rank files and folders by logical file size")]
+#[command(about = "Explore and rank files and folders by size")]
 #[command(version)]
 struct Args {
-    /// Path to scan for logical file sizes (defaults to current directory)
+    /// Path to scan for sizes (defaults to current directory)
     #[arg(short, long, default_value = ".")]
     path: String,
 
@@ -33,9 +33,17 @@ struct Args {
     #[arg(short = 'P', long)]
     full_paths: bool,
 
-    /// Minimum logical size to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
+    /// Minimum selected size metric to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
     #[arg(short = 'm', long, default_value = "0")]
     min_size: String,
+
+    /// Rank by allocated disk usage instead of logical file size
+    #[arg(long, visible_alias = "du")]
+    disk_usage: bool,
+
+    /// Skip files ignored by .gitignore, .git/info/exclude, or global gitignore rules
+    #[arg(long, visible_alias = "no-gitignored")]
+    respect_gitignore: bool,
 
     /// Output machine-readable JSON instead of the human table
     #[arg(long)]
@@ -57,8 +65,22 @@ fn main() -> Result<()> {
 
     if !args.json {
         println!("Analyzing path: {}", path.display());
+        if args.disk_usage {
+            println!("Size metric: disk usage (allocated filesystem blocks)");
+        }
+        if args.respect_gitignore {
+            println!("Gitignore: respecting git ignore rules");
+        }
         if min_size_bytes > 0 {
-            println!("Minimum size filter: {}", format_human_size(min_size_bytes));
+            println!(
+                "Minimum {} filter: {}",
+                if args.disk_usage {
+                    "disk usage"
+                } else {
+                    "size"
+                },
+                format_human_size(min_size_bytes)
+            );
         }
         println!("Scanning files and directories...\n");
     }
@@ -84,8 +106,9 @@ fn main() -> Result<()> {
     if scan_result.items.is_empty() {
         println!("No items found matching the criteria.");
         println!(
-            "Total matching file size: {}",
-            format_human_size(scan_result.matching_file_size)
+            "{}: {}",
+            scan_result.size_mode.total_label(),
+            format_human_size(scan_result.matching_total_size)
         );
         println!("Scan completed in {scan_duration:.2?}");
         return Ok(());
@@ -96,7 +119,8 @@ fn main() -> Result<()> {
         args.limit,
         scan_duration,
         args.full_paths,
-        scan_result.matching_file_size,
+        scan_result.matching_total_size,
+        scan_result.size_mode,
     );
 
     Ok(())
@@ -111,7 +135,15 @@ fn scan_options_from_args(args: &Args, min_size: u64) -> ScanOptions {
         (true, true)
     };
 
+    let size_mode = if args.disk_usage {
+        SizeMode::DiskUsage
+    } else {
+        SizeMode::Logical
+    };
+
     ScanOptions::new(include_files, include_directories, min_size)
+        .with_size_mode(size_mode)
+        .with_respect_gitignore(args.respect_gitignore)
 }
 
 fn print_warnings(warnings: &[String]) {
@@ -136,7 +168,8 @@ fn display_results(
     limit: usize,
     scan_duration: Duration,
     full_paths: bool,
-    matching_file_size: u64,
+    matching_total_size: u64,
+    size_mode: SizeMode,
 ) {
     let display_count = std::cmp::min(items.len(), limit);
 
@@ -186,8 +219,9 @@ fn display_results(
     }
 
     println!(
-        "\nTotal matching file size: {}",
-        format_human_size(matching_file_size)
+        "\n{}: {}",
+        size_mode.total_label(),
+        format_human_size(matching_total_size)
     );
     println!("Scan completed in {scan_duration:.2?}");
 }
@@ -199,5 +233,19 @@ mod tests {
     #[test]
     fn files_only_and_dirs_only_conflict() {
         assert!(Args::try_parse_from(["sizr", "--files-only", "--dirs-only"]).is_err());
+    }
+
+    #[test]
+    fn du_alias_enables_disk_usage() {
+        let args = Args::try_parse_from(["sizr", "--du"]).unwrap();
+
+        assert!(args.disk_usage);
+    }
+
+    #[test]
+    fn no_gitignored_alias_enables_respect_gitignore() {
+        let args = Args::try_parse_from(["sizr", "--no-gitignored"]).unwrap();
+
+        assert!(args.respect_gitignore);
     }
 }

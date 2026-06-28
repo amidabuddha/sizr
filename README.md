@@ -10,11 +10,13 @@ A CLI tool written in Rust to explore and list files and folders by size.
 - Option to show only files, only directories, or both
 - Human-readable file sizes
 - Machine-readable JSON output
+- Optional disk-usage mode for allocated filesystem blocks
+- Optional gitignore-aware scanning
 - Minimum size filtering with flexible units (B, KB, MB, GB, TB)
 - Full path display option for complete file paths
 - Execution timing to track scan performance
 - Unicode-safe path handling for international file names
-- Cross-platform support
+- Cross-platform support for logical-size scans
 
 ## Installation
 
@@ -74,6 +76,16 @@ sizr -P
 # Output machine-readable JSON
 sizr --json
 
+# Rank by allocated disk usage instead of logical size
+sizr --disk-usage
+# or using the visible alias
+sizr --du
+
+# Skip files ignored by gitignore rules
+sizr --respect-gitignore
+# or using the visible alias
+sizr --no-gitignored
+
 # Combine options: show only large files with full paths
 sizr --files-only --min-size 10MB --full-paths
 # or using short forms
@@ -89,10 +101,12 @@ sizr -p /Users/username/Documents -l 15 -m 2MB
 
 - `-p, --path <PATH>`: Path to analyze (defaults to current directory)
 - `-l, --limit <LIMIT>`: Number of items to display (default: 10)
-- `-m, --min-size <MIN_SIZE>`: Minimum size to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
+- `-m, --min-size <MIN_SIZE>`: Minimum selected size metric to display (e.g., 1MB, 500KB, 2GB). Default is 0 (show all)
 - `-d, --dirs-only`: Show only directories
 - `-f, --files-only`: Show only files
 - `-P, --full-paths`: Display full paths instead of truncating them
+- `--disk-usage`, `--du`: Rank and filter by allocated disk usage instead of logical file size
+- `--respect-gitignore`, `--no-gitignored`: Skip files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules
 - `--json`: Output machine-readable JSON instead of the human table
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
@@ -108,13 +122,17 @@ The `--min-size` argument accepts human-readable size formats:
 
 ## Size Semantics
 
-`sizr` reports logical file size in bytes, using filesystem metadata for regular files. It does not report allocated disk blocks and is not equivalent to `du`.
+By default, `sizr` reports logical file size in bytes, using filesystem metadata for regular files. This default is not equivalent to `du`.
 
 - File rows show the file's logical byte length.
 - Directory rows show the sum of contained regular file logical sizes, used for ranking.
 - The footer, `Total matching file size`, counts matching file rows once and does not add directory rows on top of their contents.
 - `--min-size` applies to file rows by individual file size and to directory rows by aggregate directory size.
 - Symlinks are not followed or counted by default.
+
+With `--disk-usage` or `--du`, `sizr` uses allocated filesystem blocks instead. This answers the `du`-style question: how much disk space is actually allocated for matching files. Directory rows and totals are then based on contained allocated disk usage. Disk-usage mode is supported on Unix-like platforms.
+
+By default, `sizr` scans what is actually on disk, including files ignored by Git. With `--respect-gitignore` or `--no-gitignored`, it skips files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules. This is useful when you want the “what could matter to this repo?” view instead of cache/build-output growth.
 
 ## Library API
 
@@ -164,6 +182,12 @@ sizr -p ~/Downloads -P -l 5
 # Emit JSON for scripts or CI checks
 sizr --path ~/Downloads --files-only --min-size 50MB --json
 
+# Find paths by allocated disk usage
+sizr --path ~/Downloads --disk-usage --limit 20
+
+# Scan a repository while skipping ignored build/cache output
+sizr --path . --respect-gitignore --limit 20
+
 # Find large files across the system with size filtering
 sizr --path / --files-only --min-size 1GB --limit 20
 # or using short forms
@@ -175,9 +199,9 @@ sizr -p / -f -m 1GB -l 20
 The tool displays results in a formatted table showing:
 1. Rank number
 2. Path (truncated by default, full path with `--full-paths`)
-3. Size in human-readable format (DIR rows show contained file bytes for ranking)
+3. Selected size metric in human-readable format (DIR rows show contained file bytes or allocated bytes for ranking)
 4. Type (FILE or DIR)
-5. Total matching file bytes, counted once without adding directory rows on top of their contents
+5. Total matching bytes for the selected metric, counted once without adding directory rows on top of their contents
 6. Execution timing information
 
 Example output:
@@ -212,17 +236,19 @@ Scan completed in 245.67ms
 With `--json`, stdout contains only JSON:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "root_path": "/Users/username/Documents",
+  "size_mode": "logical",
   "size_semantics": "logical_file_size_bytes",
   "directory_size_semantics": "sum_of_contained_logical_file_size_bytes",
   "symlinks_followed": false,
+  "gitignore_respected": false,
   "min_size_bytes": 0,
   "limit": 1,
   "displayed_count": 1,
   "total_items_count": 2,
-  "total_matching_file_size_bytes": 1500000,
-  "total_matching_file_size_human": "1.5 MB",
+  "total_matching_size_bytes": 1500000,
+  "total_matching_size_human": "1.5 MB",
   "elapsed_ms": 245.67,
   "items": [
     {
@@ -243,7 +269,7 @@ With `--json`, stdout contains only JSON:
 ## Dependencies
 
 - `clap`: Command-line argument parsing
-- `walkdir`: Recursive directory traversal
+- `ignore`: Recursive traversal with optional gitignore support
 - `humansize`: Human-readable size formatting
 - `anyhow`: Error handling
 - `serde` and `serde_json`: JSON output
