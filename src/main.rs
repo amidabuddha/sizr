@@ -166,6 +166,7 @@ fn print_warnings(warnings: &[String]) {
 struct TableLayout {
     path_width: usize,
     metric_columns: MetricColumns,
+    full_paths: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +198,7 @@ impl TableLayout {
         Self {
             path_width,
             metric_columns,
+            full_paths,
         }
     }
 
@@ -219,8 +221,8 @@ impl TableLayout {
             + 1
     }
 
-    fn truncate_path(self, path: &str, full_paths: bool) -> String {
-        if full_paths {
+    fn format_path(self, path: &str) -> String {
+        if self.full_paths {
             return path.to_owned();
         }
 
@@ -255,7 +257,7 @@ fn display_results(
 
     for (index, item) in items.iter().take(limit).enumerate() {
         let type_str = if item.is_directory { "DIR" } else { "FILE" };
-        let path_display = layout.truncate_path(&item.path, full_paths);
+        let path_display = layout.format_path(&item.path);
 
         if size_mode.is_combined() {
             let logical_size = format_human_size(item.logical_size);
@@ -291,6 +293,11 @@ fn display_results(
 }
 
 fn print_table_header(layout: TableLayout) {
+    if layout.full_paths {
+        print_full_path_table_header(layout);
+        return;
+    }
+
     match layout.metric_columns {
         MetricColumns::Combined => {
             println!(
@@ -315,6 +322,35 @@ fn print_table_header(layout: TableLayout) {
     println!("{}", "-".repeat(layout.separator_width()));
 }
 
+fn print_full_path_table_header(layout: TableLayout) {
+    match layout.metric_columns {
+        MetricColumns::Combined => {
+            println!(
+                "{:<rank_width$}{:>metric_width$} {:>metric_width$} {:<type_width$} Path",
+                "",
+                "Logical",
+                "Disk Usage",
+                "Type",
+                rank_width = RANK_PREFIX_WIDTH,
+                metric_width = SIZE_COLUMN_WIDTH,
+                type_width = TYPE_COLUMN_WIDTH
+            );
+        }
+        MetricColumns::Single => {
+            println!(
+                "{:<rank_width$}{:>metric_width$} {:<type_width$} Path",
+                "",
+                "Size",
+                "Type",
+                rank_width = RANK_PREFIX_WIDTH,
+                metric_width = SIZE_COLUMN_WIDTH,
+                type_width = TYPE_COLUMN_WIDTH
+            );
+        }
+    }
+    println!("{}", "-".repeat(layout.separator_width()));
+}
+
 fn print_combined_row(
     layout: TableLayout,
     rank: usize,
@@ -324,18 +360,54 @@ fn print_combined_row(
     item_type: &str,
 ) {
     println!(
-        "{rank:2}. {path:<path_width$} {logical_size:>metric_width$} {disk_usage:>metric_width$} {item_type}",
-        path_width = layout.path_width,
-        metric_width = SIZE_COLUMN_WIDTH
+        "{}",
+        format_combined_row(layout, rank, path, logical_size, disk_usage, item_type)
     );
 }
 
 fn print_single_row(layout: TableLayout, rank: usize, path: &str, size: &str, item_type: &str) {
-    println!(
+    println!("{}", format_single_row(layout, rank, path, size, item_type));
+}
+
+fn format_combined_row(
+    layout: TableLayout,
+    rank: usize,
+    path: &str,
+    logical_size: &str,
+    disk_usage: &str,
+    item_type: &str,
+) -> String {
+    if layout.full_paths {
+        return format!(
+            "{rank:2}. {logical_size:>SIZE_COLUMN_WIDTH$} {disk_usage:>SIZE_COLUMN_WIDTH$} {item_type:<TYPE_COLUMN_WIDTH$} {path}"
+        );
+    }
+
+    format!(
+        "{rank:2}. {path:<path_width$} {logical_size:>metric_width$} {disk_usage:>metric_width$} {item_type}",
+        path_width = layout.path_width,
+        metric_width = SIZE_COLUMN_WIDTH
+    )
+}
+
+fn format_single_row(
+    layout: TableLayout,
+    rank: usize,
+    path: &str,
+    size: &str,
+    item_type: &str,
+) -> String {
+    if layout.full_paths {
+        return format!(
+            "{rank:2}. {size:>SIZE_COLUMN_WIDTH$} {item_type:<TYPE_COLUMN_WIDTH$} {path}"
+        );
+    }
+
+    format!(
         "{rank:2}. {path:<path_width$} {size:>metric_width$} {item_type}",
         path_width = layout.path_width,
         metric_width = SIZE_COLUMN_WIDTH
-    );
+    )
 }
 
 fn print_totals(scan_result: &sizr::ScanResult) {
@@ -408,5 +480,52 @@ mod tests {
         let args = Args::try_parse_from(["sizr", "--no-gitignored"]).unwrap();
 
         assert!(args.respect_gitignore);
+    }
+
+    #[test]
+    fn full_path_single_metric_rows_keep_metrics_aligned_before_path() {
+        let layout = TableLayout::new(SizeMode::DiskUsage, true);
+        let short = format_single_row(layout, 1, "/short.bin", "1 B", "FILE");
+        let long = format_single_row(
+            layout,
+            2,
+            "/a/very/long/path/that/should/not/shift/the/metric/columns/file.bin",
+            "2 B",
+            "FILE",
+        );
+
+        assert_eq!(short.find("FILE"), long.find("FILE"));
+        assert!(short.ends_with("FILE /short.bin"));
+        assert!(long
+            .ends_with("FILE /a/very/long/path/that/should/not/shift/the/metric/columns/file.bin"));
+    }
+
+    #[test]
+    fn full_path_combined_rows_keep_metrics_aligned_before_path() {
+        let layout = TableLayout::new(SizeMode::Combined, true);
+        let short = format_combined_row(layout, 1, "/short.bin", "1 B", "4 KB", "FILE");
+        let long = format_combined_row(
+            layout,
+            2,
+            "/a/very/long/path/that/should/not/shift/the/metric/columns/file.bin",
+            "2 B",
+            "8 KB",
+            "FILE",
+        );
+
+        assert_eq!(short.find("FILE"), long.find("FILE"));
+        assert!(short.ends_with("FILE /short.bin"));
+        assert!(long
+            .ends_with("FILE /a/very/long/path/that/should/not/shift/the/metric/columns/file.bin"));
+    }
+
+    #[test]
+    fn truncated_rows_keep_path_before_metric() {
+        let layout = TableLayout::new(SizeMode::Logical, false);
+        let path = layout.format_path("/a/very/long/path/that/should/be/truncated/file.bin");
+        let row = format_single_row(layout, 1, &path, "1 B", "FILE");
+
+        assert!(path.starts_with("..."));
+        assert!(row.find(&path).unwrap() < row.find("1 B").unwrap());
     }
 }

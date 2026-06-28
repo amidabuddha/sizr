@@ -226,6 +226,8 @@ The tool displays results in a formatted table showing:
 5. Total matching bytes for the selected metric, counted once without adding directory rows on top of their contents
 6. Execution timing information
 
+With `--full-paths`, `sizr` prints size and type before the path so long untruncated paths do not push the metric columns out of alignment.
+
 Example output:
 ```
 Analyzing path: /Users/username/Documents
@@ -245,10 +247,10 @@ Scan completed in 245.67ms
 
 With `--full-paths`:
 ```
-Path                                                                            Size Type
+            Size Type Path
 ----------------------------------------------------------------------------------------------------
- 1. /Users/username/Documents/Videos/vacation-2023.mp4                          2.1 GB FILE
- 2. /Users/username/Documents/Photos                                            1.8 GB DIR
+ 1.       2.1 GB FILE /Users/username/Documents/Videos/vacation-2023.mp4
+ 2.       1.8 GB DIR  /Users/username/Documents/Photos
  ...
 
 Total matching file size: 15.2 GB
