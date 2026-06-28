@@ -15,6 +15,7 @@ A CLI tool written in Rust to explore and list files and folders by size.
 - Minimum size filtering with flexible units (B, KB, MB, GB, TB)
 - Full path display option for complete file paths
 - Execution timing to track scan performance
+- Parallel filesystem traversal
 - Unicode-safe path handling for international file names
 - Cross-platform support for logical-size scans
 
@@ -30,6 +31,9 @@ cd sizr
 cargo build --release
 
 # The binary will be available at target/release/sizr
+
+# Optional: install the binary into Cargo's bin directory
+cargo install --path .
 ```
 
 ## Usage
@@ -142,7 +146,7 @@ The default table shows one selected metric so rankings and totals stay compact.
 
 In JSON output, single-metric modes use `size_bytes` / `size_human` and `total_matching_size_*`. Combined mode omits those generic selected-size fields and instead emits explicit `logical_size_*` and `disk_usage_*` fields for items and totals.
 
-In disk-usage mode on Unix-like platforms, hardlinked files are counted once per device/inode pair. Later hardlink paths in traversal order contribute `0 B` to avoid double-counting allocated blocks.
+In disk-usage mode on Unix-like platforms, hardlinked files are counted once per device/inode pair. Duplicate hardlink paths are omitted from the disk-usage listing instead of showing as `0 B` rows. Totals still count the allocated blocks once.
 
 By default, `sizr` scans what is actually on disk, including files ignored by Git. With `--respect-gitignore` or `--no-gitignored`, it skips files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules. This is useful when you want the “what could matter to this repo?” view instead of cache/build-output growth.
 
@@ -297,7 +301,7 @@ With `--json`, stdout contains only JSON:
 ## Dependencies
 
 - `clap`: Command-line argument parsing
-- `ignore`: Recursive traversal with optional gitignore support
+- `ignore`: Parallel recursive traversal with optional gitignore support
 - `humansize`: Human-readable size formatting
 - `anyhow`: Error handling
 - `serde` and `serde_json`: JSON output

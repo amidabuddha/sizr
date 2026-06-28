@@ -1,6 +1,6 @@
 [package]
 name = "sizr"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "A CLI tool to explore and list files and folders by size"
 authors = ["amidabuddha"]

@@ -162,6 +162,83 @@ fn print_warnings(warnings: &[String]) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TableLayout {
+    path_width: usize,
+    metric_columns: MetricColumns,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetricColumns {
+    Single,
+    Combined,
+}
+
+const RANK_PREFIX_WIDTH: usize = 4;
+const SIZE_COLUMN_WIDTH: usize = 12;
+const TYPE_COLUMN_WIDTH: usize = 4;
+const TRUNCATION_MARKER: &str = "...";
+
+impl TableLayout {
+    fn new(size_mode: SizeMode, full_paths: bool) -> Self {
+        let metric_columns = if size_mode.is_combined() {
+            MetricColumns::Combined
+        } else {
+            MetricColumns::Single
+        };
+
+        let path_width = match (metric_columns, full_paths) {
+            (MetricColumns::Combined, true) => 69,
+            (MetricColumns::Combined, false) => 39,
+            (MetricColumns::Single, true) => 77,
+            (MetricColumns::Single, false) => 47,
+        };
+
+        Self {
+            path_width,
+            metric_columns,
+        }
+    }
+
+    fn metric_count(self) -> usize {
+        match self.metric_columns {
+            MetricColumns::Single => 1,
+            MetricColumns::Combined => 2,
+        }
+    }
+
+    fn header_path_width(self) -> usize {
+        self.path_width + RANK_PREFIX_WIDTH - 1
+    }
+
+    fn separator_width(self) -> usize {
+        RANK_PREFIX_WIDTH
+            + self.path_width
+            + self.metric_count() * (SIZE_COLUMN_WIDTH + 1)
+            + TYPE_COLUMN_WIDTH
+            + 1
+    }
+
+    fn truncate_path(self, path: &str, full_paths: bool) -> String {
+        if full_paths {
+            return path.to_owned();
+        }
+
+        let char_count = path.chars().count();
+        if char_count <= self.path_width {
+            return path.to_owned();
+        }
+
+        let tail_chars = self.path_width.saturating_sub(TRUNCATION_MARKER.len());
+        let chars: Vec<char> = path.chars().collect();
+        let start_idx = chars.len().saturating_sub(tail_chars);
+        format!(
+            "{TRUNCATION_MARKER}{}",
+            chars[start_idx..].iter().collect::<String>()
+        )
+    }
+}
+
 fn display_results(
     scan_result: &sizr::ScanResult,
     limit: usize,
@@ -171,81 +248,31 @@ fn display_results(
     let items = &scan_result.items;
     let size_mode = scan_result.size_mode;
     let display_count = std::cmp::min(items.len(), limit);
+    let layout = TableLayout::new(size_mode, full_paths);
 
     println!("Top {display_count} largest items:");
-    if size_mode.is_combined() {
-        if full_paths {
-            println!("{:<72} {:>12} {:>12} Type", "Path", "Logical", "Disk Usage");
-            println!("{}", "-".repeat(108));
-        } else {
-            println!("{:<42} {:>12} {:>12} Type", "Path", "Logical", "Disk Usage");
-            println!("{}", "-".repeat(78));
-        }
-    } else if full_paths {
-        println!("{:<80} {:>12} Type", "Path", "Size");
-        println!("{}", "-".repeat(100));
-    } else {
-        println!("{:<50} {:>12} Type", "Path", "Size");
-        println!("{}", "-".repeat(70));
-    }
+    print_table_header(layout);
 
     for (index, item) in items.iter().take(limit).enumerate() {
         let type_str = if item.is_directory { "DIR" } else { "FILE" };
-        let path_display = if full_paths {
-            item.path.clone()
-        } else if size_mode.is_combined() && item.path.chars().count() > 39 {
-            let chars: Vec<char> = item.path.chars().collect();
-            let start_idx = chars.len().saturating_sub(36);
-            format!("...{}", chars[start_idx..].iter().collect::<String>())
-        } else if !size_mode.is_combined() && item.path.chars().count() > 47 {
-            let chars: Vec<char> = item.path.chars().collect();
-            let start_idx = chars.len().saturating_sub(44);
-            format!("...{}", chars[start_idx..].iter().collect::<String>())
-        } else {
-            item.path.clone()
-        };
+        let path_display = layout.truncate_path(&item.path, full_paths);
 
         if size_mode.is_combined() {
             let logical_size = format_human_size(item.logical_size);
             let disk_usage = format_human_size(item.disk_usage_size.unwrap_or(0));
 
-            if full_paths {
-                println!(
-                    "{:2}. {:<69} {:>12} {:>12} {}",
-                    index + 1,
-                    path_display,
-                    logical_size,
-                    disk_usage,
-                    type_str
-                );
-            } else {
-                println!(
-                    "{:2}. {:<39} {:>12} {:>12} {}",
-                    index + 1,
-                    path_display,
-                    logical_size,
-                    disk_usage,
-                    type_str
-                );
-            }
-        } else if full_paths {
-            let size_str = format_human_size(item.size);
-            println!(
-                "{:2}. {:<77} {:>12} {}",
+            print_combined_row(
+                layout,
                 index + 1,
-                path_display,
-                size_str,
-                type_str
+                &path_display,
+                &logical_size,
+                &disk_usage,
+                type_str,
             );
         } else {
             let size_str = format_human_size(item.size);
-            println!(
-                "{:2}. {:<47} {:>12} {}",
-                index + 1,
-                path_display,
-                size_str,
-                type_str
-            );
+
+            print_single_row(layout, index + 1, &path_display, &size_str, type_str);
         }
     }
 
@@ -261,6 +288,54 @@ fn display_results(
         true,
     );
     println!("Scan completed in {scan_duration:.2?}");
+}
+
+fn print_table_header(layout: TableLayout) {
+    match layout.metric_columns {
+        MetricColumns::Combined => {
+            println!(
+                "{:<path_width$} {:>metric_width$} {:>metric_width$} Type",
+                "Path",
+                "Logical",
+                "Disk Usage",
+                path_width = layout.header_path_width(),
+                metric_width = SIZE_COLUMN_WIDTH
+            );
+        }
+        MetricColumns::Single => {
+            println!(
+                "{:<path_width$} {:>metric_width$} Type",
+                "Path",
+                "Size",
+                path_width = layout.header_path_width(),
+                metric_width = SIZE_COLUMN_WIDTH
+            );
+        }
+    }
+    println!("{}", "-".repeat(layout.separator_width()));
+}
+
+fn print_combined_row(
+    layout: TableLayout,
+    rank: usize,
+    path: &str,
+    logical_size: &str,
+    disk_usage: &str,
+    item_type: &str,
+) {
+    println!(
+        "{rank:2}. {path:<path_width$} {logical_size:>metric_width$} {disk_usage:>metric_width$} {item_type}",
+        path_width = layout.path_width,
+        metric_width = SIZE_COLUMN_WIDTH
+    );
+}
+
+fn print_single_row(layout: TableLayout, rank: usize, path: &str, size: &str, item_type: &str) {
+    println!(
+        "{rank:2}. {path:<path_width$} {size:>metric_width$} {item_type}",
+        path_width = layout.path_width,
+        metric_width = SIZE_COLUMN_WIDTH
+    );
 }
 
 fn print_totals(scan_result: &sizr::ScanResult) {

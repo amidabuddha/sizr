@@ -1,14 +1,16 @@
 use anyhow::{bail, Context, Result};
 use humansize::{format_size, DECIMAL};
-use ignore::{DirEntry, WalkBuilder};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 pub const LOGICAL_SIZE_SEMANTICS: &str = "logical_file_size_bytes";
@@ -233,71 +235,62 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     let mut matching_totals = SizeAccumulator::default();
     let mut hardlinks = HardlinkTracker::default();
 
-    for entry in walk_entries(path.as_ref(), options.respect_gitignore) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                warnings.push(error.to_string());
-                continue;
-            }
-        };
-        let entry_path = entry.path();
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
+    let mut walk_events = collect_walk_events(path.as_ref(), options.respect_gitignore);
+    walk_events.sort_by(compare_walk_events);
 
-        if file_type.is_dir() {
-            if entry.depth() > 0 {
-                let path_str = entry_path.to_string_lossy().to_string();
-                directories.push(path_str.clone());
-                dir_sizes.entry(path_str).or_default();
+    for event in walk_events {
+        match event {
+            WalkEvent::Warning(warning) => {
+                warnings.push(warning);
             }
-            continue;
-        }
-
-        if file_type.is_file() {
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    warnings.push(format!(
-                        "Failed to get metadata for {}: {error}",
-                        entry_path.display()
-                    ));
-                    continue;
+            WalkEvent::Directory { path, depth } => {
+                if depth > 0 {
+                    let path_str = path.to_string_lossy().to_string();
+                    directories.push(path_str.clone());
+                    dir_sizes.entry(path_str).or_default();
                 }
-            };
-            let sizes = match measure_file(entry_path, &metadata, options.size_mode, &mut hardlinks)
-            {
-                Ok(sizes) => sizes,
-                Err(error) => {
-                    warnings.push(error);
-                    continue;
-                }
-            };
-            let file_matches = sizes.selected >= options.min_size;
-            if file_matches {
-                matching_totals.add(sizes);
             }
-
-            // Add the selected size metric to parent directories inside the scanned root only.
-            let mut current_path = entry_path.parent();
-            for _ in 0..entry.depth() {
-                let Some(parent) = current_path else {
-                    break;
+            WalkEvent::File {
+                path,
+                depth,
+                metadata,
+            } => {
+                let sizes = match measure_file(&path, &metadata, options.size_mode, &mut hardlinks)
+                {
+                    Ok(sizes) => sizes,
+                    Err(error) => {
+                        warnings.push(error);
+                        continue;
+                    }
                 };
-                let parent_str = parent.to_string_lossy().to_string();
-                dir_sizes.entry(parent_str).or_default().add(sizes);
-                current_path = parent.parent();
-            }
+                let file_matches = sizes.selected >= options.min_size;
+                if file_matches {
+                    matching_totals.add(sizes);
+                }
 
-            if options.include_files && file_matches {
-                items.push(Item {
-                    path: entry_path.to_string_lossy().to_string(),
-                    size: sizes.selected,
-                    logical_size: sizes.logical,
-                    disk_usage_size: sizes.disk_usage,
-                    is_directory: false,
-                });
+                // Add the selected size metric to parent directories inside the scanned root only.
+                let mut current_path = path.parent();
+                for _ in 0..depth {
+                    let Some(parent) = current_path else {
+                        break;
+                    };
+                    let parent_str = parent.to_string_lossy().to_string();
+                    dir_sizes.entry(parent_str).or_default().add(sizes);
+                    current_path = parent.parent();
+                }
+
+                if options.include_files
+                    && file_matches
+                    && !(options.size_mode == SizeMode::DiskUsage && sizes.deduped_hardlink)
+                {
+                    items.push(Item {
+                        path: path.to_string_lossy().to_string(),
+                        size: sizes.selected,
+                        logical_size: sizes.logical,
+                        disk_usage_size: sizes.disk_usage,
+                        is_directory: false,
+                    });
+                }
             }
         }
     }
@@ -318,7 +311,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
         }
     }
 
-    items.sort_by(|a, b| b.size.cmp(&a.size));
+    items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
 
     Ok(ScanResult {
         items,
@@ -331,7 +324,103 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     })
 }
 
-fn walk_entries(path: &Path, respect_gitignore: bool) -> ignore::Walk {
+#[derive(Debug)]
+enum WalkEvent {
+    Directory {
+        path: PathBuf,
+        depth: usize,
+    },
+    File {
+        path: PathBuf,
+        depth: usize,
+        metadata: fs::Metadata,
+    },
+    Warning(String),
+}
+
+impl WalkEvent {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Directory { path, .. } | Self::File { path, .. } => Some(path),
+            Self::Warning(_) => None,
+        }
+    }
+
+    fn kind_order(&self) -> u8 {
+        match self {
+            Self::Warning(_) => 0,
+            Self::Directory { .. } => 1,
+            Self::File { .. } => 2,
+        }
+    }
+}
+
+fn compare_walk_events(a: &WalkEvent, b: &WalkEvent) -> Ordering {
+    match (a.path(), b.path()) {
+        (Some(a_path), Some(b_path)) => a_path
+            .as_os_str()
+            .cmp(b_path.as_os_str())
+            .then_with(|| a.kind_order().cmp(&b.kind_order())),
+        (None, None) => match (a, b) {
+            (WalkEvent::Warning(a), WalkEvent::Warning(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        },
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+    }
+}
+
+fn collect_walk_events(path: &Path, respect_gitignore: bool) -> Vec<WalkEvent> {
+    let (tx, rx) = mpsc::channel();
+    let walker = walk_builder(path, respect_gitignore).build_parallel();
+
+    walker.run(|| {
+        let tx = tx.clone();
+        Box::new(move |result| {
+            let event = match result {
+                Ok(entry) => walk_event_from_entry(entry),
+                Err(error) => Some(WalkEvent::Warning(error.to_string())),
+            };
+
+            if let Some(event) = event {
+                let _ = tx.send(event);
+            }
+
+            WalkState::Continue
+        })
+    });
+
+    drop(tx);
+    rx.into_iter().collect()
+}
+
+fn walk_event_from_entry(entry: DirEntry) -> Option<WalkEvent> {
+    let path = entry.path().to_path_buf();
+    let depth = entry.depth();
+    let file_type = entry.file_type()?;
+
+    if file_type.is_dir() {
+        return Some(WalkEvent::Directory { path, depth });
+    }
+
+    if file_type.is_file() {
+        return Some(match entry.metadata() {
+            Ok(metadata) => WalkEvent::File {
+                path,
+                depth,
+                metadata,
+            },
+            Err(error) => WalkEvent::Warning(format!(
+                "Failed to get metadata for {}: {error}",
+                path.display()
+            )),
+        });
+    }
+
+    None
+}
+
+fn walk_builder(path: &Path, respect_gitignore: bool) -> WalkBuilder {
     let mut builder = WalkBuilder::new(path);
     builder
         .hidden(false)
@@ -347,7 +436,7 @@ fn walk_entries(path: &Path, respect_gitignore: bool) -> ignore::Walk {
         builder.filter_entry(|entry| entry.depth() == 0 || !is_git_metadata_dir(entry));
     }
 
-    builder.build()
+    builder
 }
 
 fn is_git_metadata_dir(entry: &DirEntry) -> bool {
@@ -368,6 +457,13 @@ struct SizeValues {
     selected: u64,
     logical: u64,
     disk_usage: Option<u64>,
+    deduped_hardlink: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskUsage {
+    bytes: u64,
+    deduped_hardlink: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -402,6 +498,7 @@ fn measure_file(
             selected: logical,
             logical,
             disk_usage: None,
+            deduped_hardlink: false,
         }),
         SizeMode::DiskUsage => {
             let disk_usage = disk_usage_bytes(metadata, hardlinks).map_err(|error| {
@@ -409,9 +506,10 @@ fn measure_file(
             })?;
 
             Ok(SizeValues {
-                selected: disk_usage,
+                selected: disk_usage.bytes,
                 logical,
-                disk_usage: Some(disk_usage),
+                disk_usage: Some(disk_usage.bytes),
+                deduped_hardlink: disk_usage.deduped_hardlink,
             })
         }
         SizeMode::Combined => {
@@ -422,25 +520,35 @@ fn measure_file(
             Ok(SizeValues {
                 selected: logical,
                 logical,
-                disk_usage: Some(disk_usage),
+                disk_usage: Some(disk_usage.bytes),
+                deduped_hardlink: disk_usage.deduped_hardlink,
             })
         }
     }
 }
 
 #[cfg(unix)]
-fn disk_usage_bytes(metadata: &fs::Metadata, hardlinks: &mut HardlinkTracker) -> Result<u64> {
+fn disk_usage_bytes(metadata: &fs::Metadata, hardlinks: &mut HardlinkTracker) -> Result<DiskUsage> {
     use std::os::unix::fs::MetadataExt;
 
     if metadata.nlink() > 1 && !hardlinks.seen.insert((metadata.dev(), metadata.ino())) {
-        return Ok(0);
+        return Ok(DiskUsage {
+            bytes: 0,
+            deduped_hardlink: true,
+        });
     }
 
-    Ok(metadata.blocks().saturating_mul(512))
+    Ok(DiskUsage {
+        bytes: metadata.blocks().saturating_mul(512),
+        deduped_hardlink: false,
+    })
 }
 
 #[cfg(not(unix))]
-fn disk_usage_bytes(_metadata: &fs::Metadata, _hardlinks: &mut HardlinkTracker) -> Result<u64> {
+fn disk_usage_bytes(
+    _metadata: &fs::Metadata,
+    _hardlinks: &mut HardlinkTracker,
+) -> Result<DiskUsage> {
     bail!("disk usage is only supported on Unix-like platforms")
 }
 
@@ -750,9 +858,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.matching_total_size, expected_size);
-        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].size, expected_size);
-        assert_eq!(result.items[1].size, 0);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
