@@ -42,74 +42,15 @@ sudo install -m 755 target/release/sizr /usr/local/bin/sizr
 ## Usage
 
 ```bash
-# Analyze current directory, show top 10 items
-sizr
-
-# Analyze specific directory
-sizr --path /path/to/directory
-# or using short form
-sizr -p /path/to/directory
-
-# Show top 20 items
-sizr --limit 20
-# or using short form
-sizr -l 20
-
-# Show only directories
-sizr --dirs-only
-# or using short form
-sizr -d
-
-# Show only files
-sizr --files-only
-# or using short form
-sizr -f
-
-# Show only files larger than 1MB
-sizr --min-size 1MB --files-only
-# or using short forms
-sizr -m 1MB -f
-
-# Show items larger than 500KB
-sizr --min-size 500KB
-# or using short form
-sizr -m 500KB
-
-# Display full paths instead of truncating them
-sizr --full-paths
-# or using short form
-sizr -P
-
-# Output machine-readable JSON
-sizr --json
-
-# Rank by allocated disk usage instead of logical size
-sizr --disk-usage
-# or using the visible alias
-sizr --du
-
-# Show logical size and disk usage side by side
-sizr --both
-# or using a visible alias
-sizr --combined
-
-# Skip files ignored by gitignore rules
-sizr --respect-gitignore
-# or using the visible alias
-sizr --no-gitignored
-
-# Combine options: show only large files with full paths
-sizr --files-only --min-size 10MB --full-paths
-# or using short forms
-sizr -f -m 10MB -P
-
-# Analyze specific path with custom limit and size filter
-sizr --path /Users/username/Documents --limit 15 --min-size 2MB
-# or using short forms
-sizr -p /Users/username/Documents -l 15 -m 2MB
+sizr [OPTIONS]
 ```
 
-### Command Line Options
+By default, `sizr` scans the current directory, ranks files and directories by logical size, and prints the top 10 matching items.
+Options can be combined, such as `sizr -p ~/Downloads -f -m 50MB -P`.
+
+Run `sizr --help` for the generated command-line help.
+
+### Options
 
 - `-p, --path <PATH>`: Path to analyze (defaults to current directory)
 - `-l, --limit <LIMIT>`: Number of items to display (default: 10)
@@ -124,7 +65,7 @@ sizr -p /Users/username/Documents -l 15 -m 2MB
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
 
-#### Size Format Examples
+### Size Values
 
 The `--min-size` argument accepts human-readable size formats:
 - `500` or `500B` - 500 bytes
@@ -173,47 +114,32 @@ fn main() -> anyhow::Result<()> {
 ## Examples
 
 ```bash
-# Show top 5 largest files and directories in current folder
-sizr --limit 5
-# or using short form
-sizr -l 5
+# See the largest files and directories in the current folder
+sizr
 
-# Show top 10 largest directories only
-sizr --dirs-only
-# or using short form
-sizr -d
-
-# Analyze Downloads folder and show top 20 items
-sizr --path ~/Downloads --limit 20
-# or using short forms
+# Inspect Downloads with a larger result set
 sizr -p ~/Downloads -l 20
 
-# Show only files in a specific directory
-sizr --path /var/log --files-only --limit 15
-# or using short forms
-sizr -p /var/log -f -l 15
+# Find large files with copy-friendly full paths
+sizr -p ~/Downloads -f -m 50MB -P
 
-# Analyze large directories with full path display
-sizr --path ~/Downloads --full-paths --limit 5
-# or using short forms
-sizr -p ~/Downloads -P -l 5
+# Rank directories by contained logical size
+sizr -d -l 20
 
-# Emit JSON for scripts or CI checks
-sizr --path ~/Downloads --files-only --min-size 50MB --json
-
-# Find paths by allocated disk usage
-sizr --path ~/Downloads --disk-usage --limit 20
+# Rank by allocated disk usage instead of logical size
+sizr -p ~/Downloads --du -l 20
 
 # Compare logical size and allocated disk usage
-sizr --path ~/Downloads --both --limit 20
+sizr -p ~/Downloads --both -l 20
 
 # Scan a repository while skipping ignored build/cache output
-sizr --path . --respect-gitignore --limit 20
+sizr -p . --respect-gitignore -l 20
 
-# Find large files across the system with size filtering
-sizr --path / --files-only --min-size 1GB --limit 20
-# or using short forms
-sizr -p / -f -m 1GB -l 20
+# Emit JSON for scripts or CI checks
+sizr -p ~/Downloads -f -m 50MB --json
+
+# Find very large files under a data directory
+sizr -p /path/to/data -f -m 1GB -l 20
 ```
 
 ## Output Format
