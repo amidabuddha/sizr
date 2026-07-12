@@ -42,11 +42,11 @@ struct Args {
     disk_usage: bool,
 
     /// Show logical size and disk usage side by side, ranked by logical size
-    #[arg(long, visible_aliases = ["combined", "compare"])]
+    #[arg(long, aliases = ["combined", "compare"])]
     both: bool,
 
     /// Skip files ignored by .gitignore, .git/info/exclude, or global gitignore rules
-    #[arg(long, visible_alias = "no-gitignored")]
+    #[arg(long, alias = "no-gitignored")]
     respect_gitignore: bool,
 
     /// Output machine-readable JSON instead of the human table
@@ -259,36 +259,33 @@ fn display_results(
         let type_str = if item.is_directory { "DIR" } else { "FILE" };
         let path_display = layout.format_path(&item.path);
 
-        if size_mode.is_combined() {
+        let row = if size_mode.is_combined() {
             let logical_size = format_human_size(item.logical_size);
             let disk_usage = format_human_size(item.disk_usage_size.unwrap_or(0));
 
-            print_combined_row(
+            format_combined_row(
                 layout,
                 index + 1,
                 &path_display,
                 &logical_size,
                 &disk_usage,
                 type_str,
-            );
+            )
         } else {
             let size_str = format_human_size(item.size);
 
-            print_single_row(layout, index + 1, &path_display, &size_str, type_str);
-        }
+            format_single_row(layout, index + 1, &path_display, &size_str, type_str)
+        };
+
+        println!("{row}");
     }
 
     if items.len() > limit {
         println!("\n... and {} more items", items.len() - limit);
     }
 
-    print_totals_for_mode(
-        scan_result.matching_total_size,
-        scan_result.matching_logical_size,
-        scan_result.matching_disk_usage_size,
-        size_mode,
-        true,
-    );
+    println!();
+    print_totals(scan_result);
     println!("Scan completed in {scan_duration:.2?}");
 }
 
@@ -351,24 +348,6 @@ fn print_full_path_table_header(layout: TableLayout) {
     println!("{}", "-".repeat(layout.separator_width()));
 }
 
-fn print_combined_row(
-    layout: TableLayout,
-    rank: usize,
-    path: &str,
-    logical_size: &str,
-    disk_usage: &str,
-    item_type: &str,
-) {
-    println!(
-        "{}",
-        format_combined_row(layout, rank, path, logical_size, disk_usage, item_type)
-    );
-}
-
-fn print_single_row(layout: TableLayout, rank: usize, path: &str, size: &str, item_type: &str) {
-    println!("{}", format_single_row(layout, rank, path, size, item_type));
-}
-
 fn format_combined_row(
     layout: TableLayout,
     rank: usize,
@@ -411,38 +390,20 @@ fn format_single_row(
 }
 
 fn print_totals(scan_result: &sizr::ScanResult) {
-    print_totals_for_mode(
-        scan_result.matching_total_size,
-        scan_result.matching_logical_size,
-        scan_result.matching_disk_usage_size,
-        scan_result.size_mode,
-        false,
-    );
-}
-
-fn print_totals_for_mode(
-    matching_total_size: u64,
-    matching_logical_size: u64,
-    matching_disk_usage_size: Option<u64>,
-    size_mode: SizeMode,
-    leading_newline: bool,
-) {
-    let prefix = if leading_newline { "\n" } else { "" };
-
-    if size_mode.is_combined() {
+    if scan_result.size_mode.is_combined() {
         println!(
-            "{prefix}Total matching logical size: {}",
-            format_human_size(matching_logical_size)
+            "Total matching logical size: {}",
+            format_human_size(scan_result.matching_logical_size)
         );
         println!(
             "Total matching disk usage: {}",
-            format_human_size(matching_disk_usage_size.unwrap_or(0))
+            format_human_size(scan_result.matching_disk_usage_size.unwrap_or(0))
         );
     } else {
         println!(
-            "{prefix}{}: {}",
-            size_mode.total_label(),
-            format_human_size(matching_total_size)
+            "{}: {}",
+            scan_result.size_mode.total_label(),
+            format_human_size(scan_result.matching_total_size)
         );
     }
 }
@@ -465,9 +426,15 @@ mod tests {
 
     #[test]
     fn both_aliases_enable_combined_mode() {
-        let args = Args::try_parse_from(["sizr", "--combined"]).unwrap();
+        for alias in ["--combined", "--compare"] {
+            let args = Args::try_parse_from(["sizr", alias]).unwrap();
 
-        assert!(args.both);
+            assert!(args.both);
+            assert_eq!(
+                scan_options_from_args(&args, 0).size_mode,
+                SizeMode::Combined
+            );
+        }
     }
 
     #[test]
@@ -480,6 +447,26 @@ mod tests {
         let args = Args::try_parse_from(["sizr", "--no-gitignored"]).unwrap();
 
         assert!(args.respect_gitignore);
+        assert!(scan_options_from_args(&args, 0).respect_gitignore);
+    }
+
+    #[test]
+    fn compatibility_aliases_are_hidden_from_help() {
+        use clap::CommandFactory;
+
+        let command = Args::command();
+        for (id, hidden_aliases) in [
+            ("both", vec!["combined", "compare"]),
+            ("respect_gitignore", vec!["no-gitignored"]),
+        ] {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .expect("argument should exist");
+
+            assert_eq!(arg.get_aliases(), Some(hidden_aliases));
+            assert!(arg.get_visible_aliases().unwrap_or_default().is_empty());
+        }
     }
 
     #[test]

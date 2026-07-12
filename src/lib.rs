@@ -230,7 +230,6 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
 
     let mut items = Vec::new();
     let mut dir_sizes: HashMap<String, SizeAccumulator> = HashMap::new();
-    let mut directories = Vec::new();
     let mut warnings = Vec::new();
     let mut matching_totals = SizeAccumulator::default();
     let mut hardlinks = HardlinkTracker::default();
@@ -246,7 +245,6 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
             WalkEvent::Directory { path, depth } => {
                 if depth > 0 {
                     let path_str = path.to_string_lossy().to_string();
-                    directories.push(path_str.clone());
                     dir_sizes.entry(path_str).or_default();
                 }
             }
@@ -268,9 +266,10 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
                     matching_totals.add(sizes);
                 }
 
-                // Add the selected size metric to parent directories inside the scanned root only.
+                // Add the selected metric to ancestors below the scanned root.
+                // There are `depth - 1` such directories, excluding the root itself.
                 let mut current_path = path.parent();
-                for _ in 0..depth {
+                for _ in 1..depth {
                     let Some(parent) = current_path else {
                         break;
                     };
@@ -296,9 +295,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     }
 
     if options.include_directories {
-        for path_str in directories {
-            let sizes = dir_sizes.get(&path_str).copied().unwrap_or_default();
-
+        for (path_str, sizes) in dir_sizes {
             if sizes.selected >= options.min_size {
                 items.push(Item {
                     path: path_str,
@@ -500,25 +497,17 @@ fn measure_file(
             disk_usage: None,
             deduped_hardlink: false,
         }),
-        SizeMode::DiskUsage => {
+        SizeMode::DiskUsage | SizeMode::Combined => {
             let disk_usage = disk_usage_bytes(metadata, hardlinks).map_err(|error| {
                 format!("Failed to get disk usage for {}: {error}", path.display())
             })?;
 
             Ok(SizeValues {
-                selected: disk_usage.bytes,
-                logical,
-                disk_usage: Some(disk_usage.bytes),
-                deduped_hardlink: disk_usage.deduped_hardlink,
-            })
-        }
-        SizeMode::Combined => {
-            let disk_usage = disk_usage_bytes(metadata, hardlinks).map_err(|error| {
-                format!("Failed to get disk usage for {}: {error}", path.display())
-            })?;
-
-            Ok(SizeValues {
-                selected: logical,
+                selected: if size_mode.is_combined() {
+                    logical
+                } else {
+                    disk_usage.bytes
+                },
                 logical,
                 disk_usage: Some(disk_usage.bytes),
                 deduped_hardlink: disk_usage.deduped_hardlink,
@@ -762,6 +751,24 @@ mod tests {
             .items
             .iter()
             .any(|item| item.is_directory && file_name_is(&item.path, "b")));
+
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn empty_directories_are_included_at_zero_min_size() {
+        let root = test_root("empty-directory");
+        fs::create_dir_all(root.join("empty")).expect("empty directory should be created");
+
+        let result = scan_directory(&root, ScanOptions::new(false, true, 0)).unwrap();
+
+        assert_eq!(result.matching_total_size, 0);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].is_directory);
+        assert!(file_name_is(&result.items[0].path, "empty"));
+        assert_eq!(result.items[0].size, 0);
+        assert_eq!(result.items[0].logical_size, 0);
+        assert_eq!(result.items[0].disk_usage_size, None);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }

@@ -23,19 +23,16 @@ A CLI tool written in Rust to explore and list files and folders by size.
 
 Make sure you have Rust installed on your system. If not, install it from [rustup.rs](https://rustup.rs/).
 
+Install directly into Cargo's bin directory:
+
 ```bash
-# Clone or navigate to the project directory
-cd sizr
-
-# Build the project
-cargo build --release
-
-# The binary will be available at target/release/sizr
-
-# Optional: install the binary into Cargo's bin directory
 cargo install --path .
+```
 
-# Optional: install to /usr/local/bin instead
+Alternatively, build the binary and install it to `/usr/local/bin`:
+
+```bash
+cargo build --release
 sudo install -m 755 target/release/sizr /usr/local/bin/sizr
 ```
 
@@ -59,11 +56,13 @@ Run `sizr --help` for the generated command-line help.
 - `-f, --files-only`: Show only files
 - `-P, --full-paths`: Display full paths instead of truncating them
 - `--disk-usage`, `--du`: Rank and filter by allocated disk usage instead of logical file size
-- `--both`, `--combined`, `--compare`: Show logical size and disk usage side by side, ranked and filtered by logical size
-- `--respect-gitignore`, `--no-gitignored`: Skip files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules
+- `--both`: Show logical size and disk usage side by side, ranked and filtered by logical size
+- `--respect-gitignore`: Skip files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules
 - `--json`: Output machine-readable JSON instead of the human table
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
+
+For compatibility, `--combined` and `--compare` remain accepted as hidden aliases for `--both`, and `--no-gitignored` remains accepted as a hidden alias for `--respect-gitignore`.
 
 ### Size Values
 
@@ -86,13 +85,13 @@ By default, `sizr` reports logical file size in bytes, using filesystem metadata
 
 With `--disk-usage` or `--du`, `sizr` uses allocated filesystem blocks instead. This answers the `du`-style question: how much disk space is actually allocated for matching files. Directory rows and totals are then based on contained allocated disk usage. Disk-usage mode is supported on Unix-like platforms.
 
-The default table shows one selected metric so rankings and totals stay compact. Use `--both`, `--combined`, or `--compare` to show logical size and disk usage side by side. Combined mode ranks and filters by logical size, then reports both logical and allocated totals.
+The default table shows one selected metric so rankings and totals stay compact. Use `--both` to show logical size and disk usage side by side. Combined mode ranks and filters by logical size, then reports both logical and allocated totals.
 
 In JSON output, single-metric modes use `size_bytes` / `size_human` and `total_matching_size_*`. Combined mode omits those generic selected-size fields and instead emits explicit `logical_size_*` and `disk_usage_*` fields for items and totals.
 
 In disk-usage mode on Unix-like platforms, hardlinked files are counted once per device/inode pair. Duplicate hardlink paths are omitted from the disk-usage listing instead of showing as `0 B` rows. Totals still count the allocated blocks once.
 
-By default, `sizr` scans what is actually on disk, including files ignored by Git. With `--respect-gitignore` or `--no-gitignored`, it skips files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules. This is useful when you want the “what could matter to this repo?” view instead of cache/build-output growth.
+By default, `sizr` scans what is actually on disk, including files ignored by Git. With `--respect-gitignore`, it skips files ignored by `.gitignore`, `.git/info/exclude`, or global gitignore rules. This is useful when you want the “what could matter to this repo?” view instead of cache/build-output growth.
 
 ## Library API
 
@@ -228,14 +227,6 @@ With `--json`, stdout contains only JSON:
   }
 }
 ```
-
-## Dependencies
-
-- `clap`: Command-line argument parsing
-- `ignore`: Parallel recursive traversal with optional gitignore support
-- `humansize`: Human-readable size formatting
-- `anyhow`: Error handling
-- `serde` and `serde_json`: JSON output
 
 ## License
 

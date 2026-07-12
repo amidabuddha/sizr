@@ -9,10 +9,6 @@ license = "MIT"
 keywords = ["cli", "filesystem", "size", "directory", "files"]
 categories = ["command-line-utilities"]
 
-[[bin]]
-name = "sizr"
-path = "src/main.rs"
-
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 ignore = "0.4"
