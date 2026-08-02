@@ -1,0 +1,29 @@
+{
+  "schema_version": 4,
+  "root_path": "<ROOT>",
+  "size_mode": "logical",
+  "size_semantics": "logical_file_size_bytes",
+  "directory_size_semantics": "sum_of_contained_logical_file_size_bytes",
+  "symlinks_followed": false,
+  "gitignore_respected": false,
+  "min_size_bytes": 0,
+  "limit": 1,
+  "displayed_count": 1,
+  "total_items_count": 2,
+  "total_matching_size_bytes": 30,
+  "total_matching_size_human": "30 B",
+  "elapsed_ms": 12.0,
+  "items": [
+    {
+      "rank": 1,
+      "path": "<ROOT>/large.bin",
+      "type": "file",
+      "size_bytes": 20,
+      "size_human": "20 B"
+    }
+  ],
+  "warnings": {
+    "count": 0,
+    "messages": []
+  }
+}

@@ -109,22 +109,86 @@ impl ScanOptions {
 
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub path: String,
-    pub size: u64,
-    pub logical_size: u64,
-    pub disk_usage_size: Option<u64>,
-    pub is_directory: bool,
+    path: PathBuf,
+    size: u64,
+    logical_size: u64,
+    disk_usage_size: Option<u64>,
+    is_directory: bool,
+}
+
+impl Item {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn logical_size(&self) -> u64 {
+        self.logical_size
+    }
+
+    pub fn disk_usage_size(&self) -> Option<u64> {
+        self.disk_usage_size
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.is_directory
+    }
 }
 
 #[derive(Debug)]
 pub struct ScanResult {
-    pub items: Vec<Item>,
-    pub matching_total_size: u64,
-    pub matching_logical_size: u64,
-    pub matching_disk_usage_size: Option<u64>,
-    pub size_mode: SizeMode,
-    pub respect_gitignore: bool,
-    pub warnings: Vec<String>,
+    root_path: PathBuf,
+    options: ScanOptions,
+    items: Vec<Item>,
+    matching_total_size: u64,
+    matching_logical_size: u64,
+    matching_disk_usage_size: Option<u64>,
+    warnings: Vec<String>,
+}
+
+impl ScanResult {
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    pub fn options(&self) -> ScanOptions {
+        self.options
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    pub fn into_items(self) -> Vec<Item> {
+        self.items
+    }
+
+    pub fn matching_total_size(&self) -> u64 {
+        self.matching_total_size
+    }
+
+    pub fn matching_logical_size(&self) -> u64 {
+        self.matching_logical_size
+    }
+
+    pub fn matching_disk_usage_size(&self) -> Option<u64> {
+        self.matching_disk_usage_size
+    }
+
+    pub fn size_mode(&self) -> SizeMode {
+        self.options.size_mode
+    }
+
+    pub fn respect_gitignore(&self) -> bool {
+        self.options.respect_gitignore
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -228,13 +292,14 @@ pub fn format_human_size(size: u64) -> String {
 pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<ScanResult> {
     options.size_mode.validate_platform()?;
 
+    let root_path = path.as_ref().to_path_buf();
     let mut items = Vec::new();
-    let mut dir_sizes: HashMap<String, SizeAccumulator> = HashMap::new();
+    let mut dir_sizes: HashMap<PathBuf, SizeAccumulator> = HashMap::new();
     let mut warnings = Vec::new();
     let mut matching_totals = SizeAccumulator::default();
     let mut hardlinks = HardlinkTracker::default();
 
-    let mut walk_events = collect_walk_events(path.as_ref(), options.respect_gitignore);
+    let mut walk_events = collect_walk_events(&root_path, options.respect_gitignore);
     walk_events.sort_by(compare_walk_events);
 
     for event in walk_events {
@@ -244,8 +309,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
             }
             WalkEvent::Directory { path, depth } => {
                 if depth > 0 {
-                    let path_str = path.to_string_lossy().to_string();
-                    dir_sizes.entry(path_str).or_default();
+                    dir_sizes.entry(path).or_default();
                 }
             }
             WalkEvent::File {
@@ -273,8 +337,10 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
                     let Some(parent) = current_path else {
                         break;
                     };
-                    let parent_str = parent.to_string_lossy().to_string();
-                    dir_sizes.entry(parent_str).or_default().add(sizes);
+                    dir_sizes
+                        .entry(parent.to_path_buf())
+                        .or_default()
+                        .add(sizes);
                     current_path = parent.parent();
                 }
 
@@ -283,7 +349,7 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
                     && !(options.size_mode == SizeMode::DiskUsage && sizes.deduped_hardlink)
                 {
                     items.push(Item {
-                        path: path.to_string_lossy().to_string(),
+                        path,
                         size: sizes.selected,
                         logical_size: sizes.logical,
                         disk_usage_size: sizes.disk_usage,
@@ -295,10 +361,10 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     }
 
     if options.include_directories {
-        for (path_str, sizes) in dir_sizes {
+        for (path, sizes) in dir_sizes {
             if sizes.selected >= options.min_size {
                 items.push(Item {
-                    path: path_str,
+                    path,
                     size: sizes.selected,
                     logical_size: sizes.logical,
                     disk_usage_size: sizes.disk_usage,
@@ -311,12 +377,12 @@ pub fn scan_directory(path: impl AsRef<Path>, options: ScanOptions) -> Result<Sc
     items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
 
     Ok(ScanResult {
+        root_path,
+        options,
         items,
         matching_total_size: matching_totals.selected,
         matching_logical_size: matching_totals.logical,
         matching_disk_usage_size: matching_totals.disk_usage,
-        size_mode: options.size_mode,
-        respect_gitignore: options.respect_gitignore,
         warnings,
     })
 }
@@ -542,80 +608,68 @@ fn disk_usage_bytes(
 }
 
 pub fn build_json_output(
-    root_path: &Path,
     scan_result: &ScanResult,
     limit: usize,
     scan_duration: Duration,
-    min_size: u64,
 ) -> JsonOutput {
-    let displayed_count = std::cmp::min(scan_result.items.len(), limit);
+    let size_mode = scan_result.size_mode();
+    let displayed_count = std::cmp::min(scan_result.items().len(), limit);
     let items = scan_result
-        .items
+        .items()
         .iter()
         .take(limit)
         .enumerate()
         .map(|(index, item)| JsonItem {
             rank: index + 1,
-            path: item.path.clone(),
-            item_type: if item.is_directory { "dir" } else { "file" },
-            size_bytes: (!scan_result.size_mode.is_combined()).then_some(item.size),
-            size_human: (!scan_result.size_mode.is_combined())
-                .then(|| format_human_size(item.size)),
-            logical_size_bytes: scan_result
-                .size_mode
+            path: item.path().display().to_string(),
+            item_type: if item.is_directory() { "dir" } else { "file" },
+            size_bytes: (!size_mode.is_combined()).then_some(item.size()),
+            size_human: (!size_mode.is_combined()).then(|| format_human_size(item.size())),
+            logical_size_bytes: size_mode.is_combined().then_some(item.logical_size()),
+            logical_size_human: size_mode
                 .is_combined()
-                .then_some(item.logical_size),
-            logical_size_human: scan_result
-                .size_mode
-                .is_combined()
-                .then(|| format_human_size(item.logical_size)),
-            disk_usage_bytes: item
-                .disk_usage_size
-                .filter(|_| scan_result.size_mode.is_combined()),
+                .then(|| format_human_size(item.logical_size())),
+            disk_usage_bytes: item.disk_usage_size().filter(|_| size_mode.is_combined()),
             disk_usage_human: item
-                .disk_usage_size
-                .filter(|_| scan_result.size_mode.is_combined())
+                .disk_usage_size()
+                .filter(|_| size_mode.is_combined())
                 .map(format_human_size),
         })
         .collect();
 
     JsonOutput {
         schema_version: 4,
-        root_path: root_path.display().to_string(),
-        size_mode: scan_result.size_mode.as_str(),
-        size_semantics: scan_result.size_mode.size_semantics(),
-        directory_size_semantics: scan_result.size_mode.directory_size_semantics(),
+        root_path: scan_result.root_path().display().to_string(),
+        size_mode: size_mode.as_str(),
+        size_semantics: size_mode.size_semantics(),
+        directory_size_semantics: size_mode.directory_size_semantics(),
         symlinks_followed: SYMLINKS_FOLLOWED,
-        gitignore_respected: scan_result.respect_gitignore,
-        min_size_bytes: min_size,
+        gitignore_respected: scan_result.respect_gitignore(),
+        min_size_bytes: scan_result.options().min_size,
         limit,
         displayed_count,
-        total_items_count: scan_result.items.len(),
-        total_matching_size_bytes: (!scan_result.size_mode.is_combined())
-            .then_some(scan_result.matching_total_size),
-        total_matching_size_human: (!scan_result.size_mode.is_combined())
-            .then(|| format_human_size(scan_result.matching_total_size)),
-        total_matching_logical_size_bytes: scan_result
-            .size_mode
+        total_items_count: scan_result.items().len(),
+        total_matching_size_bytes: (!size_mode.is_combined())
+            .then_some(scan_result.matching_total_size()),
+        total_matching_size_human: (!size_mode.is_combined())
+            .then(|| format_human_size(scan_result.matching_total_size())),
+        total_matching_logical_size_bytes: size_mode
             .is_combined()
-            .then_some(scan_result.matching_logical_size),
-        total_matching_logical_size_human: scan_result
-            .size_mode
+            .then_some(scan_result.matching_logical_size()),
+        total_matching_logical_size_human: size_mode
             .is_combined()
-            .then(|| format_human_size(scan_result.matching_logical_size)),
-        total_matching_disk_usage_bytes: scan_result
-            .size_mode
+            .then(|| format_human_size(scan_result.matching_logical_size())),
+        total_matching_disk_usage_bytes: size_mode
             .is_combined()
-            .then_some(scan_result.matching_disk_usage_size.unwrap_or(0)),
-        total_matching_disk_usage_human: scan_result
-            .size_mode
+            .then_some(scan_result.matching_disk_usage_size().unwrap_or(0)),
+        total_matching_disk_usage_human: size_mode
             .is_combined()
-            .then(|| format_human_size(scan_result.matching_disk_usage_size.unwrap_or(0))),
+            .then(|| format_human_size(scan_result.matching_disk_usage_size().unwrap_or(0))),
         elapsed_ms: scan_duration.as_secs_f64() * 1000.0,
         items,
         warnings: JsonWarnings {
-            count: scan_result.warnings.len(),
-            messages: scan_result.warnings.clone(),
+            count: scan_result.warnings().len(),
+            messages: scan_result.warnings().to_vec(),
         },
     }
 }
@@ -675,12 +729,12 @@ mod tests {
         root
     }
 
-    fn file_name_is(path: &str, expected: &str) -> bool {
-        Path::new(path).file_name() == Some(std::ffi::OsStr::new(expected))
+    fn file_name_is(path: &Path, expected: &str) -> bool {
+        path.file_name() == Some(std::ffi::OsStr::new(expected))
     }
 
-    fn parent_name_is(path: &str, expected: &str) -> bool {
-        Path::new(path).parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new(expected))
+    fn parent_name_is(path: &Path, expected: &str) -> bool {
+        path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new(expected))
     }
 
     #[test]
@@ -707,9 +761,9 @@ mod tests {
 
         let result = scan_directory(missing_path, ScanOptions::new(true, true, 0)).unwrap();
 
-        assert_eq!(result.matching_total_size, 0);
-        assert!(result.items.is_empty());
-        assert!(!result.warnings.is_empty());
+        assert_eq!(result.matching_total_size(), 0);
+        assert!(result.items().is_empty());
+        assert!(!result.warnings().is_empty());
     }
 
     #[test]
@@ -718,16 +772,16 @@ mod tests {
 
         let result = scan_directory(&root, ScanOptions::new(false, true, 0)).unwrap();
 
-        assert_eq!(result.matching_total_size, 3_000);
-        assert_eq!(result.items.len(), 2);
-        assert!(result.items.iter().all(|item| item.is_directory));
+        assert_eq!(result.matching_total_size(), 3_000);
+        assert_eq!(result.items().len(), 2);
+        assert!(result.items().iter().all(Item::is_directory));
         assert_eq!(
             result
-                .items
+                .items()
                 .iter()
-                .find(|item| file_name_is(&item.path, "b"))
+                .find(|item| file_name_is(item.path(), "b"))
                 .unwrap()
-                .size,
+                .size(),
             2_000
         );
 
@@ -740,17 +794,17 @@ mod tests {
 
         let result = scan_directory(&root, ScanOptions::new(true, true, 1_500)).unwrap();
 
-        assert_eq!(result.matching_total_size, 2_000);
-        assert_eq!(result.items.len(), 2);
-        assert!(result.items.iter().any(|item| {
-            !item.is_directory
-                && file_name_is(&item.path, "large.bin")
-                && parent_name_is(&item.path, "b")
+        assert_eq!(result.matching_total_size(), 2_000);
+        assert_eq!(result.items().len(), 2);
+        assert!(result.items().iter().any(|item| {
+            !item.is_directory()
+                && file_name_is(item.path(), "large.bin")
+                && parent_name_is(item.path(), "b")
         }));
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| item.is_directory && file_name_is(&item.path, "b")));
+            .any(|item| item.is_directory() && file_name_is(item.path(), "b")));
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -762,13 +816,13 @@ mod tests {
 
         let result = scan_directory(&root, ScanOptions::new(false, true, 0)).unwrap();
 
-        assert_eq!(result.matching_total_size, 0);
-        assert_eq!(result.items.len(), 1);
-        assert!(result.items[0].is_directory);
-        assert!(file_name_is(&result.items[0].path, "empty"));
-        assert_eq!(result.items[0].size, 0);
-        assert_eq!(result.items[0].logical_size, 0);
-        assert_eq!(result.items[0].disk_usage_size, None);
+        assert_eq!(result.matching_total_size(), 0);
+        assert_eq!(result.items().len(), 1);
+        assert!(result.items()[0].is_directory());
+        assert!(file_name_is(result.items()[0].path(), "empty"));
+        assert_eq!(result.items()[0].size(), 0);
+        assert_eq!(result.items()[0].logical_size(), 0);
+        assert_eq!(result.items()[0].disk_usage_size(), None);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -783,13 +837,38 @@ mod tests {
         let result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
 
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| item.path.contains("данни-サイズ")));
+            .any(|item| item.path().to_string_lossy().contains("данни-サイズ")));
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| item.path.contains("файл.bin")));
+            .any(|item| item.path().to_string_lossy().contains("файл.bin")));
+
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn distinct_non_utf8_paths_keep_separate_directory_totals() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = test_root("non-utf8-paths");
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let first = root.join(OsString::from_vec(vec![0xff]));
+        let second = root.join(OsString::from_vec(vec![0xfe]));
+
+        fs::create_dir(&first).expect("first non-UTF-8 directory should be created");
+        fs::create_dir(&second).expect("second non-UTF-8 directory should be created");
+        create_file(&first.join("first.bin"), 10);
+        create_file(&second.join("second.bin"), 20);
+
+        let result = scan_directory(&root, ScanOptions::new(false, true, 0)).unwrap();
+        let mut directory_sizes: Vec<u64> = result.items().iter().map(Item::size).collect();
+        directory_sizes.sort_unstable();
+
+        assert_eq!(directory_sizes, vec![10, 20]);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -799,11 +878,15 @@ mod tests {
         let root = create_fixture("json-summary");
         let scan_result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
 
-        let output = build_json_output(&root, &scan_result, 1, Duration::from_millis(12), 0);
+        let output = build_json_output(&scan_result, 1, Duration::from_millis(12));
         let serialized = serde_json::to_string(&output).expect("JSON output should serialize");
 
+        assert_eq!(scan_result.root_path(), root);
+        assert_eq!(scan_result.options().min_size, 0);
         assert!(serialized.contains("\"schema_version\":4"));
         assert_eq!(output.schema_version, 4);
+        assert_eq!(output.root_path, root.display().to_string());
+        assert_eq!(output.min_size_bytes, 0);
         assert_eq!(output.size_mode, "logical");
         assert_eq!(output.size_semantics, "logical_file_size_bytes");
         assert_eq!(
@@ -839,10 +922,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.size_mode, SizeMode::DiskUsage);
-        assert_eq!(result.matching_total_size, expected_size);
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].size, expected_size);
+        assert_eq!(result.size_mode(), SizeMode::DiskUsage);
+        assert_eq!(result.matching_total_size(), expected_size);
+        assert_eq!(result.items().len(), 1);
+        assert_eq!(result.items()[0].size(), expected_size);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -864,9 +947,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.matching_total_size, expected_size);
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].size, expected_size);
+        assert_eq!(result.matching_total_size(), expected_size);
+        assert_eq!(result.items().len(), 1);
+        assert_eq!(result.items()[0].size(), expected_size);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -885,16 +968,19 @@ mod tests {
             ScanOptions::new(true, false, 0).with_size_mode(SizeMode::Combined),
         )
         .unwrap();
-        let output = build_json_output(&root, &result, 1, Duration::from_millis(12), 0);
+        let output = build_json_output(&result, 1, Duration::from_millis(12));
 
-        assert_eq!(result.size_mode, SizeMode::Combined);
-        assert_eq!(result.matching_total_size, 4_096);
-        assert_eq!(result.matching_logical_size, 4_096);
-        assert_eq!(result.matching_disk_usage_size, Some(expected_disk_usage));
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].size, 4_096);
-        assert_eq!(result.items[0].logical_size, 4_096);
-        assert_eq!(result.items[0].disk_usage_size, Some(expected_disk_usage));
+        assert_eq!(result.size_mode(), SizeMode::Combined);
+        assert_eq!(result.matching_total_size(), 4_096);
+        assert_eq!(result.matching_logical_size(), 4_096);
+        assert_eq!(result.matching_disk_usage_size(), Some(expected_disk_usage));
+        assert_eq!(result.items().len(), 1);
+        assert_eq!(result.items()[0].size(), 4_096);
+        assert_eq!(result.items()[0].logical_size(), 4_096);
+        assert_eq!(
+            result.items()[0].disk_usage_size(),
+            Some(expected_disk_usage)
+        );
         assert_eq!(output.schema_version, 4);
         assert_eq!(output.size_mode, "combined");
         assert_eq!(output.total_matching_size_bytes, None);
@@ -922,7 +1008,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = build_json_output(&root, &scan_result, 1, Duration::from_millis(12), 0);
+        let output = build_json_output(&scan_result, 1, Duration::from_millis(12));
 
         assert_eq!(output.size_mode, "disk_usage");
         assert_eq!(output.size_semantics, "allocated_disk_usage_bytes");
@@ -938,7 +1024,7 @@ mod tests {
     fn write_json_output_serializes_with_trailing_newline() {
         let root = create_fixture("json-writer");
         let scan_result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
-        let output = build_json_output(&root, &scan_result, 1, Duration::from_millis(12), 0);
+        let output = build_json_output(&scan_result, 1, Duration::from_millis(12));
         let mut buffer = Vec::new();
 
         write_json_output(&mut buffer, &output).expect("JSON output should be written");
@@ -959,15 +1045,15 @@ mod tests {
 
         let result = scan_directory(&root, ScanOptions::new(true, false, 0)).unwrap();
 
-        assert!(!result.respect_gitignore);
+        assert!(!result.respect_gitignore());
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| file_name_is(&item.path, "ignored.bin")));
+            .any(|item| file_name_is(item.path(), "ignored.bin")));
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| file_name_is(&item.path, "keep.bin")));
+            .any(|item| file_name_is(item.path(), "keep.bin")));
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -985,18 +1071,18 @@ mod tests {
             ScanOptions::new(true, false, 0).with_respect_gitignore(true),
         )
         .unwrap();
-        let output = build_json_output(&root, &result, 10, Duration::from_millis(12), 0);
+        let output = build_json_output(&result, 10, Duration::from_millis(12));
 
-        assert!(result.respect_gitignore);
+        assert!(result.respect_gitignore());
         assert!(output.gitignore_respected);
         assert!(!result
-            .items
+            .items()
             .iter()
-            .any(|item| file_name_is(&item.path, "ignored.bin")));
+            .any(|item| file_name_is(item.path(), "ignored.bin")));
         assert!(result
-            .items
+            .items()
             .iter()
-            .any(|item| file_name_is(&item.path, "keep.bin")));
+            .any(|item| file_name_is(item.path(), "keep.bin")));
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -1015,11 +1101,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!result.items.iter().any(|item| item.path.contains(".git")));
-        assert!(result
-            .items
+        assert!(!result
+            .items()
             .iter()
-            .any(|item| file_name_is(&item.path, "keep.bin")));
+            .any(|item| item.path().to_string_lossy().contains(".git")));
+        assert!(result
+            .items()
+            .iter()
+            .any(|item| file_name_is(item.path(), "keep.bin")));
 
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
@@ -1037,8 +1126,8 @@ mod tests {
 
         let result = scan_directory(&root, ScanOptions::new(true, true, 0)).unwrap();
 
-        assert_eq!(result.matching_total_size, 0);
-        assert!(result.items.is_empty());
+        assert_eq!(result.matching_total_size(), 0);
+        assert!(result.items().is_empty());
 
         fs::remove_dir_all(root).expect("fixture root should be removed");
         fs::remove_dir_all(outside).expect("fixture target should be removed");

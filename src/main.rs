@@ -98,20 +98,14 @@ fn main() -> Result<()> {
     let scan_duration = start_time.elapsed();
 
     if args.json {
-        let output = build_json_output(
-            path,
-            &scan_result,
-            args.limit,
-            scan_duration,
-            min_size_bytes,
-        );
+        let output = build_json_output(&scan_result, args.limit, scan_duration);
         write_json_output(io::stdout().lock(), &output)?;
         return Ok(());
     }
 
-    print_warnings(&scan_result.warnings);
+    print_warnings(scan_result.warnings());
 
-    if scan_result.items.is_empty() {
+    if scan_result.items().is_empty() {
         println!("No items found matching the criteria.");
         print_totals(&scan_result);
         println!("Scan completed in {scan_duration:.2?}");
@@ -247,8 +241,8 @@ fn display_results(
     scan_duration: Duration,
     full_paths: bool,
 ) {
-    let items = &scan_result.items;
-    let size_mode = scan_result.size_mode;
+    let items = scan_result.items();
+    let size_mode = scan_result.size_mode();
     let display_count = std::cmp::min(items.len(), limit);
     let layout = TableLayout::new(size_mode, full_paths);
 
@@ -256,12 +250,13 @@ fn display_results(
     print_table_header(layout);
 
     for (index, item) in items.iter().take(limit).enumerate() {
-        let type_str = if item.is_directory { "DIR" } else { "FILE" };
-        let path_display = layout.format_path(&item.path);
+        let type_str = if item.is_directory() { "DIR" } else { "FILE" };
+        let path = item.path().to_string_lossy();
+        let path_display = layout.format_path(&path);
 
         let row = if size_mode.is_combined() {
-            let logical_size = format_human_size(item.logical_size);
-            let disk_usage = format_human_size(item.disk_usage_size.unwrap_or(0));
+            let logical_size = format_human_size(item.logical_size());
+            let disk_usage = format_human_size(item.disk_usage_size().unwrap_or(0));
 
             format_combined_row(
                 layout,
@@ -272,7 +267,7 @@ fn display_results(
                 type_str,
             )
         } else {
-            let size_str = format_human_size(item.size);
+            let size_str = format_human_size(item.size());
 
             format_single_row(layout, index + 1, &path_display, &size_str, type_str)
         };
@@ -390,20 +385,20 @@ fn format_single_row(
 }
 
 fn print_totals(scan_result: &sizr::ScanResult) {
-    if scan_result.size_mode.is_combined() {
+    if scan_result.size_mode().is_combined() {
         println!(
             "Total matching logical size: {}",
-            format_human_size(scan_result.matching_logical_size)
+            format_human_size(scan_result.matching_logical_size())
         );
         println!(
             "Total matching disk usage: {}",
-            format_human_size(scan_result.matching_disk_usage_size.unwrap_or(0))
+            format_human_size(scan_result.matching_disk_usage_size().unwrap_or(0))
         );
     } else {
         println!(
             "{}: {}",
-            scan_result.size_mode.total_label(),
-            format_human_size(scan_result.matching_total_size)
+            scan_result.size_mode().total_label(),
+            format_human_size(scan_result.matching_total_size())
         );
     }
 }

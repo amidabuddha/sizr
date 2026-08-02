@@ -102,13 +102,18 @@ use sizr::{scan_directory, ScanOptions};
 
 fn main() -> anyhow::Result<()> {
     let result = scan_directory(".", ScanOptions::new(true, true, 0))?;
-    for item in result.items {
-        println!("{}\t{}", item.size, item.path);
+    for item in result.items() {
+        println!("{}\t{}", item.size(), item.path().display());
     }
 
     Ok(())
 }
 ```
+
+`ScanResult` retains the scanned root and effective options, while each item exposes its native
+filesystem path through `item.path()`. `build_json_output(&result, limit, duration)` derives its
+root and minimum-size metadata from that result so the serialized context cannot drift from the
+scan that produced it.
 
 ## Examples
 
