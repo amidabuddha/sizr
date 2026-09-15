@@ -21,20 +21,65 @@ A CLI tool written in Rust to explore and list files and folders by size.
 
 ## Installation
 
-Make sure you have Rust installed on your system. If not, install it from [rustup.rs](https://rustup.rs/).
+### Clean installation from a fresh checkout
 
-Install directly into Cargo's bin directory:
+You need Git, Rust and Cargo, and the native linker/build tools required by Rust on your platform. If Rust is not installed, follow [rustup.rs](https://rustup.rs/). This repository does not pin a Rust toolchain or declare a minimum Rust version. No project-specific environment variables or secrets are required.
 
-```bash
-cargo install --path .
-```
-
-Alternatively, build the binary and install it to `/usr/local/bin`:
+Clone the repository and enter its root, then restore locked dependencies and build the release binary:
 
 ```bash
-cargo build --release
-sudo install -m 755 target/release/sizr /usr/local/bin/sizr
+git clone https://github.com/amidabuddha/sizr.git
+cd sizr
+cargo build --release --locked
+cargo run --release --locked -- --help
 ```
+
+Cargo automatically downloads any missing crates using the committed `Cargo.lock`; no separate dependency-install command is needed. Network access is required for crates that are not already cached. Keep `Cargo.lock`: `--locked` fails if dependency resolution would require changing it.
+
+With Cargo's default output location, the executable is `target/release/sizr` (`target/release/sizr.exe` on Windows). You can run it directly or use `cargo run --release --locked -- [OPTIONS]` without installing it globally.
+
+### Optional command installation
+
+To make `sizr` available on your `PATH`, install into Cargo's bin directory from the repository root:
+
+```bash
+cargo install --path . --locked
+```
+
+Ensure Cargo's bin directory is on your `PATH`. If you already maintain an installed copy elsewhere, update that installation instead of creating a second copy. Local builds and clean rebuilds below do not update installed executables or publish the crate.
+
+## Development
+
+### Normal development
+
+Run these commands from the repository root:
+
+```bash
+# Incrementally build the debug binary
+cargo build --locked
+
+# Build as needed and run; arguments after -- go to sizr
+cargo run --locked -- --path . --limit 20
+
+# Run library/binary unit tests, CLI integration tests, and documentation tests
+cargo test --locked
+```
+
+Cargo reuses existing build output for unchanged code and dependencies. Ordinary source edits do not require deleting dependencies or cleaning the entire build. For an optimized build, use `cargo build --release --locked`. There is no repository-provided watch command; rerun the build, run, or test command after edits.
+
+### Clean rebuild of an existing checkout
+
+The project's generated Cargo output is `target/`, ignored by Git. From the repository root, first confirm that `target/` contains only this project's generated output and is not a symlink to a shared or unrelated directory. The explicit `--target-dir target` below scopes cleanup and rebuilding to that project-local directory even if you normally override Cargo's target directory.
+
+```bash
+cargo clean --target-dir target
+cargo build --release --locked --target-dir target
+cargo run --release --locked --target-dir target -- --help
+```
+
+This removes debug/release binaries and intermediate build output in `target/`, then rebuilds from scratch. Cargo reuses cached crates or downloads missing ones automatically. If `target/` has already been removed, skip `cargo clean` and build directly.
+
+Preserve `Cargo.lock`, source, configuration, any `.env` files, and user data. Do not clear global Cargo caches, remove rustup/toolchains or installed targets, or delete installed executables. Publishing and releasing are separate from these local workflows.
 
 ## Usage
 
